@@ -15,3 +15,7 @@ coordinator:
       path: "../../target/wasm32-unknown-unknown/release/coordinator1.wasm"
       dependencies:
         - name: integrity
+    - name: dht_util
+      hash: ~
+      path: "../../target/wasm32-unknown-unknown/release/dht_util.wasm"
+      dependencies: ~

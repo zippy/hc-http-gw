@@ -41,6 +41,23 @@ impl TestGateway {
                         zome_name: "coordinator1".to_string(),
                         fn_name: "get_limited".to_string(),
                     },
+                    // dht_util zome functions for DHT endpoint tests
+                    ZomeFn {
+                        zome_name: "dht_util".to_string(),
+                        fn_name: "dht_get_record".to_string(),
+                    },
+                    ZomeFn {
+                        zome_name: "dht_util".to_string(),
+                        fn_name: "dht_get_details".to_string(),
+                    },
+                    ZomeFn {
+                        zome_name: "dht_util".to_string(),
+                        fn_name: "dht_get_links".to_string(),
+                    },
+                    ZomeFn {
+                        zome_name: "dht_util".to_string(),
+                        fn_name: "dht_count_links".to_string(),
+                    },
                 ]
                 .into_iter()
                 .collect(),

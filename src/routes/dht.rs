@@ -2,18 +2,124 @@
 //!
 //! Provides direct DHT access for browser extension agents via the dht_util zome.
 
-use crate::app_selection::try_get_valid_app;
 use crate::service::AppState;
-use crate::transcode::{base64_json_to_hsb, hsb_to_json};
+use crate::transcode::hsb_to_json;
 use crate::{HcHttpGatewayError, HcHttpGatewayResult};
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use holochain_client::CellInfo;
 use holochain_types::dna::DnaHash;
-use serde::Deserialize;
+use holochain_types::prelude::{
+    ActionHash, AgentPubKey, AnyDhtHash, AnyLinkableHash, EntryHash, ExternalHash, ExternIO,
+};
+use serde::{Deserialize, Serialize};
 
 /// DHT utility zome name.
 const DHT_UTIL_ZOME: &str = "dht_util";
+
+// ============================================================================
+// Hash parsing helpers
+// ============================================================================
+
+/// Parse a hash string into AnyDhtHash.
+///
+/// The hash string format is "u{base64}" where base64 decodes to 39 bytes.
+/// AnyDhtHash can be either EntryHash or ActionHash:
+/// - uhCEk = Entry (0x84, 0x21, 0x24)
+/// - uhCkk = Action (0x84, 0x29, 0x24)
+fn parse_any_dht_hash(s: &str) -> Result<AnyDhtHash, HcHttpGatewayError> {
+    if let Ok(hash) = EntryHash::try_from(s) {
+        return Ok(AnyDhtHash::from(hash));
+    }
+    if let Ok(hash) = ActionHash::try_from(s) {
+        return Ok(AnyDhtHash::from(hash));
+    }
+    Err(HcHttpGatewayError::RequestMalformed(format!(
+        "Invalid DHT hash format: {}",
+        s
+    )))
+}
+
+/// Parse a hash string into AnyLinkableHash.
+///
+/// The hash string format is "u{base64}" where base64 decodes to 39 bytes.
+/// The first 3 bytes are the prefix that identifies the hash type:
+/// - uhCAk = Agent (0x84, 0x20, 0x24)
+/// - uhCEk = Entry (0x84, 0x21, 0x24)
+/// - uhCkk = Action (0x84, 0x29, 0x24)
+/// - uhC8k = External (0x84, 0x2f, 0x24)
+fn parse_any_linkable_hash(s: &str) -> Result<AnyLinkableHash, HcHttpGatewayError> {
+    // Try parsing as each possible type and convert to AnyLinkableHash
+    if let Ok(hash) = AgentPubKey::try_from(s) {
+        return Ok(AnyLinkableHash::from(hash));
+    }
+    if let Ok(hash) = EntryHash::try_from(s) {
+        return Ok(AnyLinkableHash::from(hash));
+    }
+    if let Ok(hash) = ActionHash::try_from(s) {
+        return Ok(AnyLinkableHash::from(hash));
+    }
+    if let Ok(hash) = ExternalHash::try_from(s) {
+        return Ok(AnyLinkableHash::from(hash));
+    }
+    Err(HcHttpGatewayError::RequestMalformed(format!(
+        "Invalid hash format: {}",
+        s
+    )))
+}
+
+// ============================================================================
+// Zome input types - must match dht_util zome's expected input structures
+// ============================================================================
+
+/// Get strategy for DHT operations
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub enum GetStrategyInput {
+    /// Get from local storage only
+    Local,
+    /// Get from network (default)
+    #[default]
+    Network,
+}
+
+/// Get options for record/details operations
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct GetOptionsInput {
+    #[serde(default)]
+    pub strategy: GetStrategyInput,
+}
+
+/// Input for dht_get_record and dht_get_details zome functions
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetRecordInput {
+    pub hash: AnyDhtHash,
+    #[serde(default)]
+    pub options: GetOptionsInput,
+}
+
+/// Input for dht_get_links zome function
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetLinksZomeInput {
+    pub base: AnyLinkableHash,
+    #[serde(default)]
+    pub link_type: Option<u16>,
+    #[serde(default)]
+    pub tag_prefix: Option<Vec<u8>>,
+}
+
+/// Input for dht_count_links zome function
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CountLinksZomeInput {
+    pub base: AnyLinkableHash,
+    #[serde(default)]
+    pub link_type: Option<u16>,
+    #[serde(default)]
+    pub tag_prefix: Option<Vec<u8>>,
+}
+
+// ============================================================================
+// HTTP request parameter types
+// ============================================================================
 
 /// Path parameters for record/details endpoints.
 #[derive(Debug, Deserialize)]
@@ -59,13 +165,18 @@ pub async fn dht_get_record(
     let dna_hash = DnaHash::try_from(path.dna_hash.clone())
         .map_err(|_| HcHttpGatewayError::RequestMalformed("Invalid DNA hash".to_string()))?;
 
-    // Build payload for dht_get_record
-    let payload = serde_json::json!({
-        "hash": path.hash,
-        "options": {
-            "strategy": "Network"
-        }
-    });
+    // Parse the record hash
+    let hash = parse_any_dht_hash(&path.hash)?;
+
+    // Build and encode payload for dht_get_record
+    let input = GetRecordInput {
+        hash,
+        options: GetOptionsInput {
+            strategy: GetStrategyInput::Network,
+        },
+    };
+    let payload = ExternIO::encode(input)
+        .map_err(|e| HcHttpGatewayError::RequestMalformed(format!("Failed to encode payload: {}", e)))?;
 
     call_dht_util_zome(&state, dna_hash, "dht_get_record", payload).await
 }
@@ -86,13 +197,18 @@ pub async fn dht_get_details(
     let dna_hash = DnaHash::try_from(path.dna_hash.clone())
         .map_err(|_| HcHttpGatewayError::RequestMalformed("Invalid DNA hash".to_string()))?;
 
-    // Build payload for dht_get_details
-    let payload = serde_json::json!({
-        "hash": path.hash,
-        "options": {
-            "strategy": "Network"
-        }
-    });
+    // Parse the record hash
+    let hash = parse_any_dht_hash(&path.hash)?;
+
+    // Build and encode payload for dht_get_details
+    let input = GetRecordInput {
+        hash,
+        options: GetOptionsInput {
+            strategy: GetStrategyInput::Network,
+        },
+    };
+    let payload = ExternIO::encode(input)
+        .map_err(|e| HcHttpGatewayError::RequestMalformed(format!("Failed to encode payload: {}", e)))?;
 
     call_dht_util_zome(&state, dna_hash, "dht_get_details", payload).await
 }
@@ -114,23 +230,28 @@ pub async fn dht_get_links(
     let dna_hash = DnaHash::try_from(path.dna_hash.clone())
         .map_err(|_| HcHttpGatewayError::RequestMalformed("Invalid DNA hash".to_string()))?;
 
-    // Build payload for dht_get_links
-    let mut payload = serde_json::json!({
-        "base": query.base
-    });
+    // Parse the base hash
+    let base = parse_any_linkable_hash(&query.base)?;
 
-    if let Some(link_type) = query.link_type {
-        payload["link_type"] = serde_json::json!(link_type);
-    }
-
-    if let Some(tag) = query.tag {
-        // Decode base64 tag prefix
+    // Parse optional tag prefix
+    let tag_prefix = if let Some(tag) = query.tag {
         let tag_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &tag)
             .map_err(|_| {
                 HcHttpGatewayError::RequestMalformed("Invalid tag encoding".to_string())
             })?;
-        payload["tag_prefix"] = serde_json::json!(tag_bytes);
-    }
+        Some(tag_bytes)
+    } else {
+        None
+    };
+
+    // Build and encode payload for dht_get_links
+    let input = GetLinksZomeInput {
+        base,
+        link_type: query.link_type,
+        tag_prefix,
+    };
+    let payload = ExternIO::encode(input)
+        .map_err(|e| HcHttpGatewayError::RequestMalformed(format!("Failed to encode payload: {}", e)))?;
 
     call_dht_util_zome(&state, dna_hash, "dht_get_links", payload).await
 }
@@ -152,24 +273,97 @@ pub async fn dht_count_links(
     let dna_hash = DnaHash::try_from(path.dna_hash.clone())
         .map_err(|_| HcHttpGatewayError::RequestMalformed("Invalid DNA hash".to_string()))?;
 
-    // Build payload for dht_count_links
-    let mut payload = serde_json::json!({
-        "base": query.base
-    });
+    // Parse the base hash
+    let base = parse_any_linkable_hash(&query.base)?;
 
-    if let Some(link_type) = query.link_type {
-        payload["link_type"] = serde_json::json!(link_type);
-    }
-
-    if let Some(tag) = query.tag {
+    // Parse optional tag prefix
+    let tag_prefix = if let Some(tag) = query.tag {
         let tag_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &tag)
             .map_err(|_| {
                 HcHttpGatewayError::RequestMalformed("Invalid tag encoding".to_string())
             })?;
-        payload["tag_prefix"] = serde_json::json!(tag_bytes);
-    }
+        Some(tag_bytes)
+    } else {
+        None
+    };
+
+    // Build and encode payload for dht_count_links
+    let input = CountLinksZomeInput {
+        base,
+        link_type: query.link_type,
+        tag_prefix,
+    };
+    let payload = ExternIO::encode(input)
+        .map_err(|e| HcHttpGatewayError::RequestMalformed(format!("Failed to encode payload: {}", e)))?;
 
     call_dht_util_zome(&state, dna_hash, "dht_count_links", payload).await
+}
+
+/// Find an app that contains the specified DNA hash.
+/// Unlike try_get_valid_app, this searches through all allowed apps
+/// instead of matching by coordinator_identifier.
+async fn find_app_with_dna_and_zome(
+    dna_hash: &DnaHash,
+    _zome_name: &str,
+    app_info_cache: crate::app_selection::AppInfoCache,
+    allowed_app_ids: &crate::config::AllowedAppIds,
+    admin_call: std::sync::Arc<dyn crate::AdminCall>,
+) -> HcHttpGatewayResult<holochain_client::AppInfo> {
+    use holochain_conductor_api::AppStatusFilter;
+
+    // First check the cache
+    {
+        let installed_apps = app_info_cache.read().await;
+        for app in installed_apps.iter() {
+            if !allowed_app_ids.contains(&app.installed_app_id) {
+                continue;
+            }
+            // Check if this app has a cell with the matching DNA hash
+            let has_dna = app.cell_info.values().any(|cells| {
+                cells.iter().any(|cell| match cell {
+                    CellInfo::Provisioned(p) => p.cell_id.dna_hash() == dna_hash,
+                    _ => false,
+                })
+            });
+            if has_dna {
+                return Ok(app.clone());
+            }
+        }
+    }
+
+    // Cache miss - refresh from admin websocket
+    let new_apps = admin_call
+        .list_apps(Some(AppStatusFilter::Enabled))
+        .await
+        .map_err(|e| {
+            HcHttpGatewayError::RequestMalformed(format!("Failed to list apps: {}", e))
+        })?;
+
+    // Update cache
+    {
+        let mut cache = app_info_cache.write().await;
+        *cache = new_apps.clone();
+    }
+
+    // Search again
+    for app in new_apps {
+        if !allowed_app_ids.contains(&app.installed_app_id) {
+            continue;
+        }
+        let has_dna = app.cell_info.values().any(|cells| {
+            cells.iter().any(|cell| match cell {
+                CellInfo::Provisioned(p) => p.cell_id.dna_hash() == dna_hash,
+                _ => false,
+            })
+        });
+        if has_dna {
+            return Ok(app);
+        }
+    }
+
+    Err(HcHttpGatewayError::RequestMalformed(
+        "No allowed app found containing the specified DNA".to_string(),
+    ))
 }
 
 /// Verify session from headers if authenticator is configured.
@@ -210,25 +404,17 @@ async fn call_dht_util_zome(
     state: &AppState,
     dna_hash: DnaHash,
     fn_name: &str,
-    payload: serde_json::Value,
+    payload: ExternIO,
 ) -> HcHttpGatewayResult<String> {
-    // Find an app with this DNA that has the dht_util zome
-    // For now, we'll use any app that contains this DNA
-    let app_info = try_get_valid_app(
-        dna_hash.clone(),
-        "dht_util".to_string(), // coordinator identifier
+    // Find an app with this DNA - search through all allowed apps
+    let app_info = find_app_with_dna_and_zome(
+        &dna_hash,
+        DHT_UTIL_ZOME,
         state.app_info_cache.clone(),
         &state.configuration.allowed_app_ids,
         state.admin_call.clone(),
     )
     .await?;
-
-    // Transcode payload to ExternIO
-    let payload_str = serde_json::to_string(&payload)
-        .map_err(|e| HcHttpGatewayError::RequestMalformed(format!("Invalid payload: {}", e)))?;
-    let payload_b64 =
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload_str.as_bytes());
-    let zome_call_payload = base64_json_to_hsb(Some(payload_b64))?;
 
     // Get cell id
     let cell_id = app_info
@@ -257,7 +443,7 @@ async fn call_dht_util_zome(
             cell_id,
             DHT_UTIL_ZOME.to_string(),
             fn_name.to_string(),
-            zome_call_payload,
+            payload,
         )
         .await?;
 
