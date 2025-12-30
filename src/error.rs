@@ -26,6 +26,9 @@ pub enum HcHttpGatewayError {
         /// Function name
         fn_name: String,
     },
+    /// Authentication failed error.
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
     /// Holochain errors
     #[error("Holochain error: {0}")]
     HolochainError(#[from] holochain_client::ConductorApiError),
@@ -60,6 +63,9 @@ impl HcHttpGatewayError {
             HcHttpGatewayError::RequestMalformed(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             HcHttpGatewayError::UnauthorizedFunction { .. } => {
                 (StatusCode::FORBIDDEN, self.to_string())
+            }
+            HcHttpGatewayError::AuthenticationFailed(_) => {
+                (StatusCode::UNAUTHORIZED, self.to_string())
             }
             HcHttpGatewayError::UpstreamUnavailable => (
                 StatusCode::BAD_GATEWAY,

@@ -3,6 +3,8 @@
 #![doc = include_str!("../spec.md")]
 
 mod app_selection;
+/// Authentication module for agent verification.
+pub mod auth;
 mod config;
 mod error;
 mod holochain;

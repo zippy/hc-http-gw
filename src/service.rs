@@ -1,6 +1,7 @@
 //! HTTP gateway service for Holochain
 
 use crate::app_selection::AppInfoCache;
+use crate::auth::AgentAuthenticator;
 use crate::holochain::{AdminCall, AppCall};
 use crate::{config::Configuration, router::hc_http_gateway_router};
 use axum::Router;
@@ -16,12 +17,28 @@ pub struct HcHttpGatewayService {
 }
 
 /// Shared application state
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppState {
+    /// Gateway configuration.
     pub configuration: Configuration,
+    /// Admin call handler.
     pub admin_call: Arc<dyn AdminCall>,
+    /// App call handler.
     pub app_call: Arc<dyn AppCall>,
+    /// App info cache.
     pub app_info_cache: AppInfoCache,
+    /// Optional authenticator for browser extension agents.
+    pub authenticator: Option<Arc<dyn AgentAuthenticator>>,
+}
+
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("configuration", &self.configuration)
+            .field("app_info_cache", &self.app_info_cache)
+            .field("has_authenticator", &self.authenticator.is_some())
+            .finish()
+    }
 }
 
 impl HcHttpGatewayService {

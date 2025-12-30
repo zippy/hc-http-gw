@@ -1,10 +1,10 @@
 [workspace]
-members = ["coordinator1", "coordinator2", "integrity"]
+members = ["coordinator1", "coordinator2", "integrity", "dht_util"]
 resolver = "2"
 
 [workspace.dependencies]
-hdi = "0.7.0-dev.17"
-hdk = "0.6.0-dev.20"
+hdi = "0.7.0"
+hdk = "0.6.0"
 holochain_serialized_bytes = "*"
 serde = "1.0"
 

@@ -1,27 +1,52 @@
+use crate::auth::AgentAuthenticator;
 use crate::holochain::AppCall;
 use crate::{
     config::Configuration,
-    routes::{health_check, zome_call},
+    routes::{
+        auth_challenge, auth_verify, dht_count_links, dht_get_details, dht_get_links,
+        dht_get_record, health_check, zome_call,
+    },
     service::AppState,
     AdminCall,
 };
-use axum::{http::StatusCode, routing::get, Router};
+use axum::{http::StatusCode, routing::{get, post}, Router};
 use std::sync::Arc;
 
+/// Create the HTTP gateway router.
 pub fn hc_http_gateway_router(
     configuration: Configuration,
     admin_call: Arc<dyn AdminCall>,
     app_call: Arc<dyn AppCall>,
+) -> Router {
+    hc_http_gateway_router_with_auth(configuration, admin_call, app_call, None)
+}
+
+/// Create the HTTP gateway router with optional authentication.
+pub fn hc_http_gateway_router_with_auth(
+    configuration: Configuration,
+    admin_call: Arc<dyn AdminCall>,
+    app_call: Arc<dyn AppCall>,
+    authenticator: Option<Arc<dyn AgentAuthenticator>>,
 ) -> Router {
     let state = AppState {
         configuration,
         admin_call,
         app_call,
         app_info_cache: Default::default(),
+        authenticator,
     };
 
     Router::new()
         .route("/health", get(health_check))
+        // Auth endpoints
+        .route("/auth/challenge", post(auth_challenge))
+        .route("/auth/verify", post(auth_verify))
+        // DHT endpoints (require session if authenticator configured)
+        .route("/dht/{dna_hash}/record/{hash}", get(dht_get_record))
+        .route("/dht/{dna_hash}/details/{hash}", get(dht_get_details))
+        .route("/dht/{dna_hash}/links", get(dht_get_links))
+        .route("/dht/{dna_hash}/links/count", get(dht_count_links))
+        // Zome call endpoint
         .route(
             "/{dna_hash}/{coordinator_identifier}/{zome_name}/{fn_name}",
             get(zome_call),

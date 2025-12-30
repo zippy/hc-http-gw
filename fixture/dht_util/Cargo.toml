@@ -1,0 +1,13 @@
+[package]
+name = "dht_util"
+version = "0.1.0"
+edition = "2021"
+description = "Utility zome providing passthrough DHT operations for browser extension access"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "dht_util"
+
+[dependencies]
+hdk = { workspace = true }
+serde = { workspace = true }
