@@ -4,7 +4,7 @@ use crate::{
     config::Configuration,
     routes::{
         auth_challenge, auth_verify, dht_count_links, dht_get_details, dht_get_links,
-        dht_get_record, health_check, zome_call,
+        dht_get_record, health_check, ws_handler, zome_call,
     },
     service::AppState,
     AdminCall,
@@ -36,7 +36,9 @@ pub fn hc_http_gateway_router_with_auth(
         authenticator,
     };
 
-    Router::new()
+    let ws_enabled = state.configuration.websocket.enabled;
+
+    let mut router = Router::new()
         .route("/health", get(health_check))
         // Auth endpoints
         .route("/auth/challenge", post(auth_challenge))
@@ -50,7 +52,14 @@ pub fn hc_http_gateway_router_with_auth(
         .route(
             "/{dna_hash}/{coordinator_identifier}/{zome_name}/{fn_name}",
             get(zome_call),
-        )
+        );
+
+    // WebSocket endpoint for browser extension connections
+    if ws_enabled {
+        router = router.route("/ws", get(ws_handler));
+    }
+
+    router
         .method_not_allowed_fallback(|| async { (StatusCode::METHOD_NOT_ALLOWED, ()) })
         .with_state(state)
 }

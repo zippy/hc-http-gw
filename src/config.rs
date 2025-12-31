@@ -19,6 +19,15 @@ pub const DEFAULT_MAX_APP_CONNECTIONS: u32 = 50;
 /// Default timeout for zome calls
 pub const DEFAULT_ZOME_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Default WebSocket heartbeat interval (30 seconds)
+pub const DEFAULT_WS_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Default WebSocket heartbeat timeout (5 seconds)
+pub const DEFAULT_WS_HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Default WebSocket connection idle timeout (60 seconds)
+pub const DEFAULT_WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Errors when parsing config arguments.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigParseError {
@@ -48,6 +57,32 @@ pub struct Configuration {
     pub max_app_connections: u32,
     /// Timeout for zome calls
     pub zome_call_timeout: std::time::Duration,
+    /// WebSocket configuration for browser extension connections.
+    pub websocket: WebSocketConfig,
+}
+
+/// WebSocket configuration for browser extension connections.
+#[derive(Debug, Clone)]
+pub struct WebSocketConfig {
+    /// Enable WebSocket endpoint for browser extensions.
+    pub enabled: bool,
+    /// Interval between heartbeat pings.
+    pub heartbeat_interval: std::time::Duration,
+    /// Timeout for heartbeat pong response.
+    pub heartbeat_timeout: std::time::Duration,
+    /// Idle timeout before closing connection.
+    pub idle_timeout: std::time::Duration,
+}
+
+impl Default for WebSocketConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            heartbeat_interval: DEFAULT_WS_HEARTBEAT_INTERVAL,
+            heartbeat_timeout: DEFAULT_WS_HEARTBEAT_TIMEOUT,
+            idle_timeout: DEFAULT_WS_IDLE_TIMEOUT,
+        }
+    }
 }
 
 impl Configuration {
@@ -103,6 +138,7 @@ impl Configuration {
             allowed_fns,
             max_app_connections,
             zome_call_timeout,
+            websocket: WebSocketConfig::default(),
         })
     }
 }
@@ -262,6 +298,7 @@ mod tests {
             allowed_fns,
             max_app_connections: DEFAULT_MAX_APP_CONNECTIONS,
             zome_call_timeout: DEFAULT_ZOME_CALL_TIMEOUT,
+            websocket: WebSocketConfig::default(),
         }
     }
 
