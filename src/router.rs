@@ -1,3 +1,4 @@
+use crate::agent_proxy::AgentProxyManager;
 use crate::auth::AgentAuthenticator;
 use crate::holochain::AppCall;
 use crate::{
@@ -34,6 +35,7 @@ pub fn hc_http_gateway_router_with_auth(
         app_call,
         app_info_cache: Default::default(),
         authenticator,
+        agent_proxy: AgentProxyManager::new(),
     };
 
     let ws_enabled = state.configuration.websocket.enabled;

@@ -1,5 +1,6 @@
 //! HTTP gateway service for Holochain
 
+use crate::agent_proxy::AgentProxyManager;
 use crate::app_selection::AppInfoCache;
 use crate::auth::AgentAuthenticator;
 use crate::holochain::{AdminCall, AppCall};
@@ -29,6 +30,8 @@ pub struct AppState {
     pub app_info_cache: AppInfoCache,
     /// Optional authenticator for browser extension agents.
     pub authenticator: Option<Arc<dyn AgentAuthenticator>>,
+    /// Agent proxy manager for WebSocket connections.
+    pub agent_proxy: AgentProxyManager,
 }
 
 impl std::fmt::Debug for AppState {
@@ -37,6 +40,7 @@ impl std::fmt::Debug for AppState {
             .field("configuration", &self.configuration)
             .field("app_info_cache", &self.app_info_cache)
             .field("has_authenticator", &self.authenticator.is_some())
+            .field("agent_proxy", &self.agent_proxy)
             .finish()
     }
 }

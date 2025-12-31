@@ -5,6 +5,7 @@
 //! - Register agents for specific DNAs
 //! - Receive signals forwarded from the Holochain network
 
+use crate::agent_proxy::WsSender;
 use crate::service::AppState;
 use axum::{
     extract::{
@@ -168,6 +169,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     client_msg,
                                     &mut conn_state,
                                     &state,
+                                    &tx,
                                 ).await;
 
                                 if let Some(resp) = response {
@@ -223,15 +225,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
-    // Cleanup: unregister all agents
-    for (dna_hash, agent_pubkey) in &conn_state.registrations {
-        tracing::debug!(
-            "Unregistering agent {} from DNA {} on disconnect",
-            agent_pubkey,
-            dna_hash
-        );
-        // TODO: Actually unregister from agent proxy manager
-    }
+    // Cleanup: unregister all agents from the proxy manager
+    state.agent_proxy.unregister_all(&tx).await;
 
     // Wait for send task to complete
     send_task.abort();
@@ -242,6 +237,7 @@ async fn handle_client_message(
     msg: ClientMessage,
     state: &mut ConnectionState,
     app_state: &AppState,
+    sender: &WsSender,
 ) -> Option<ServerMessage> {
     match msg {
         ClientMessage::Auth { session_token } => {
@@ -274,18 +270,17 @@ async fn handle_client_message(
                 });
             }
 
-            // Check if already registered
+            // Check if already registered locally
             let key = (dna_hash.clone(), agent_pubkey.clone());
             if !state.registrations.contains(&key) {
                 state.registrations.push(key);
-
-                // TODO: Register with agent proxy manager to receive signals
-                tracing::info!(
-                    "Agent {} registered for DNA {}",
-                    agent_pubkey,
-                    dna_hash
-                );
             }
+
+            // Register with agent proxy manager to receive signals
+            app_state
+                .agent_proxy
+                .register(dna_hash.clone(), agent_pubkey.clone(), sender.clone())
+                .await;
 
             Some(ServerMessage::Registered { dna_hash, agent_pubkey })
         }
@@ -300,12 +295,8 @@ async fn handle_client_message(
             let key = (dna_hash.clone(), agent_pubkey.clone());
             state.registrations.retain(|r| r != &key);
 
-            // TODO: Unregister from agent proxy manager
-            tracing::info!(
-                "Agent {} unregistered from DNA {}",
-                agent_pubkey,
-                dna_hash
-            );
+            // Unregister from agent proxy manager
+            app_state.agent_proxy.unregister(&dna_hash, &agent_pubkey).await;
 
             Some(ServerMessage::Unregistered { dna_hash, agent_pubkey })
         }
@@ -463,5 +454,192 @@ mod tests {
         // Remove registration
         state.registrations.retain(|r| r != &key);
         assert!(state.registrations.is_empty());
+    }
+
+    // Integration tests for handle_client_message with AgentProxyManager
+    mod handler_integration {
+        use super::*;
+        use crate::agent_proxy::AgentProxyManager;
+        use crate::config::{AllowedAppIds, Configuration, WebSocketConfig};
+        use crate::service::AppState;
+        use crate::{MockAdminCall, MockAppCall};
+        use std::str::FromStr;
+        use std::sync::Arc;
+
+        fn create_test_app_state() -> AppState {
+            let admin_call = Arc::new(MockAdminCall::new());
+            let app_call = Arc::new(MockAppCall::new());
+
+            let config = Configuration {
+                admin_socket_addr: "127.0.0.1:9999".parse().unwrap(),
+                payload_limit_bytes: 1024,
+                allowed_app_ids: AllowedAppIds::from_str("").unwrap(),
+                allowed_fns: Default::default(),
+                max_app_connections: 10,
+                zome_call_timeout: std::time::Duration::from_secs(10),
+                websocket: WebSocketConfig::default(),
+            };
+
+            AppState {
+                configuration: config,
+                admin_call,
+                app_call,
+                app_info_cache: Default::default(),
+                authenticator: None,
+                agent_proxy: AgentProxyManager::new(),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_register_adds_to_agent_proxy() {
+            let app_state = create_test_app_state();
+            let (tx, _rx) = mpsc::channel(32);
+            let mut conn_state = ConnectionState::default();
+            conn_state.authenticated = true;
+
+            // Register an agent
+            let msg = ClientMessage::Register {
+                dna_hash: "dna1".to_string(),
+                agent_pubkey: "agent1".to_string(),
+            };
+
+            let response = handle_client_message(msg, &mut conn_state, &app_state, &tx).await;
+
+            // Should return Registered
+            assert!(matches!(response, Some(ServerMessage::Registered { .. })));
+
+            // Should be registered in AgentProxyManager
+            assert!(app_state.agent_proxy.is_registered("dna1", "agent1").await);
+            assert_eq!(app_state.agent_proxy.registration_count().await, 1);
+        }
+
+        #[tokio::test]
+        async fn test_unregister_removes_from_agent_proxy() {
+            let app_state = create_test_app_state();
+            let (tx, _rx) = mpsc::channel(32);
+            let mut conn_state = ConnectionState::default();
+            conn_state.authenticated = true;
+
+            // First register an agent
+            let register_msg = ClientMessage::Register {
+                dna_hash: "dna1".to_string(),
+                agent_pubkey: "agent1".to_string(),
+            };
+            handle_client_message(register_msg, &mut conn_state, &app_state, &tx).await;
+            assert!(app_state.agent_proxy.is_registered("dna1", "agent1").await);
+
+            // Now unregister
+            let unregister_msg = ClientMessage::Unregister {
+                dna_hash: "dna1".to_string(),
+                agent_pubkey: "agent1".to_string(),
+            };
+            let response = handle_client_message(unregister_msg, &mut conn_state, &app_state, &tx).await;
+
+            // Should return Unregistered
+            assert!(matches!(response, Some(ServerMessage::Unregistered { .. })));
+
+            // Should no longer be registered
+            assert!(!app_state.agent_proxy.is_registered("dna1", "agent1").await);
+            assert_eq!(app_state.agent_proxy.registration_count().await, 0);
+        }
+
+        #[tokio::test]
+        async fn test_register_requires_authentication() {
+            let app_state = create_test_app_state();
+            let (tx, _rx) = mpsc::channel(32);
+            let mut conn_state = ConnectionState::default();
+            // Not authenticated
+
+            let msg = ClientMessage::Register {
+                dna_hash: "dna1".to_string(),
+                agent_pubkey: "agent1".to_string(),
+            };
+
+            let response = handle_client_message(msg, &mut conn_state, &app_state, &tx).await;
+
+            // Should return error
+            assert!(matches!(response, Some(ServerMessage::Error { .. })));
+
+            // Should NOT be registered
+            assert!(!app_state.agent_proxy.is_registered("dna1", "agent1").await);
+        }
+
+        #[tokio::test]
+        async fn test_auth_without_authenticator_succeeds() {
+            let app_state = create_test_app_state();
+            let (tx, _rx) = mpsc::channel(32);
+            let mut conn_state = ConnectionState::default();
+
+            let msg = ClientMessage::Auth {
+                session_token: "any_token".to_string(),
+            };
+
+            let response = handle_client_message(msg, &mut conn_state, &app_state, &tx).await;
+
+            // Should return AuthOk (no authenticator configured)
+            assert!(matches!(response, Some(ServerMessage::AuthOk)));
+            assert!(conn_state.authenticated);
+        }
+
+        #[tokio::test]
+        async fn test_multiple_registrations_same_connection() {
+            let app_state = create_test_app_state();
+            let (tx, _rx) = mpsc::channel(32);
+            let mut conn_state = ConnectionState::default();
+            conn_state.authenticated = true;
+
+            // Register first agent
+            let msg1 = ClientMessage::Register {
+                dna_hash: "dna1".to_string(),
+                agent_pubkey: "agent1".to_string(),
+            };
+            handle_client_message(msg1, &mut conn_state, &app_state, &tx).await;
+
+            // Register second agent on same connection
+            let msg2 = ClientMessage::Register {
+                dna_hash: "dna2".to_string(),
+                agent_pubkey: "agent2".to_string(),
+            };
+            handle_client_message(msg2, &mut conn_state, &app_state, &tx).await;
+
+            // Both should be registered
+            assert!(app_state.agent_proxy.is_registered("dna1", "agent1").await);
+            assert!(app_state.agent_proxy.is_registered("dna2", "agent2").await);
+            assert_eq!(app_state.agent_proxy.registration_count().await, 2);
+
+            // Local state should track both
+            assert_eq!(conn_state.registrations.len(), 2);
+        }
+
+        #[tokio::test]
+        async fn test_unregister_all_on_disconnect() {
+            let app_state = create_test_app_state();
+            let (tx, _rx) = mpsc::channel(32);
+            let mut conn_state = ConnectionState::default();
+            conn_state.authenticated = true;
+
+            // Register multiple agents
+            let msg1 = ClientMessage::Register {
+                dna_hash: "dna1".to_string(),
+                agent_pubkey: "agent1".to_string(),
+            };
+            handle_client_message(msg1, &mut conn_state, &app_state, &tx).await;
+
+            let msg2 = ClientMessage::Register {
+                dna_hash: "dna2".to_string(),
+                agent_pubkey: "agent2".to_string(),
+            };
+            handle_client_message(msg2, &mut conn_state, &app_state, &tx).await;
+
+            assert_eq!(app_state.agent_proxy.registration_count().await, 2);
+
+            // Simulate disconnect cleanup
+            app_state.agent_proxy.unregister_all(&tx).await;
+
+            // All should be unregistered
+            assert!(!app_state.agent_proxy.is_registered("dna1", "agent1").await);
+            assert!(!app_state.agent_proxy.is_registered("dna2", "agent2").await);
+            assert_eq!(app_state.agent_proxy.registration_count().await, 0);
+        }
     }
 }
