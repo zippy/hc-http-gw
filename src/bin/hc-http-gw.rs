@@ -1,8 +1,8 @@
 use anyhow::Context;
 use clap::Parser;
 use holochain_http_gateway::{
-    resolve_address_from_url, AdminConn, AllowedAppIds, AllowedFns, AppConnPool, Configuration,
-    HcHttpGatewayService,
+    resolve_address_from_url, AdminConn, AgentProxyManager, AllowedAppIds, AllowedFns,
+    AppConnPool, Configuration, HcHttpGatewayService,
 };
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -35,12 +35,29 @@ async fn main() -> anyhow::Result<()> {
 
     let args = HcHttpGatewayArgs::parse();
 
-    let admin_call = Arc::new(AdminConn::new(configuration.admin_socket_addr));
-    let app_call = Arc::new(AppConnPool::new(configuration.clone(), admin_call.clone()));
+    // Create AgentProxyManager for signal forwarding to browser extensions
+    let agent_proxy = AgentProxyManager::new();
 
-    let service =
-        HcHttpGatewayService::new(args.address, args.port, configuration, admin_call, app_call)
-            .await?;
+    let admin_call = Arc::new(AdminConn::new(configuration.admin_socket_addr));
+
+    // Create AppConnPool with signal forwarding enabled
+    let app_call = Arc::new(AppConnPool::with_signal_forwarding(
+        configuration.clone(),
+        admin_call.clone(),
+        agent_proxy.clone(),
+    ));
+
+    // Create service with agent proxy for WebSocket-based signal delivery
+    let service = HcHttpGatewayService::with_auth(
+        args.address,
+        args.port,
+        configuration,
+        admin_call,
+        app_call,
+        None, // No authenticator for now
+        Some(agent_proxy),
+    )
+    .await?;
 
     service.run().await?;
 

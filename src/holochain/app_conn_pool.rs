@@ -1,6 +1,9 @@
+use crate::agent_proxy::AgentProxyManager;
 use crate::config::{AllowedFns, Configuration};
 use crate::holochain::{AdminCall, AppCall};
+use crate::routes::websocket::ServerMessage;
 use crate::{HcHttpGatewayError, HcHttpGatewayResult};
+use base64::Engine;
 use futures::future::BoxFuture;
 use holochain_client::{
     AppWebsocket, AuthorizeSigningCredentialsPayload, CellId, CellInfo, ClientAgentSigner,
@@ -8,6 +11,7 @@ use holochain_client::{
     IssueAppAuthenticationTokenPayload, Timestamp, WebsocketConfig, ZomeCallTarget,
 };
 use holochain_types::app::InstalledAppId;
+use holochain_types::prelude::Signal;
 use holochain_types::websocket::AllowedOrigins;
 use holochain_websocket::WebsocketError;
 use std::collections::HashMap;
@@ -37,6 +41,8 @@ pub struct AppConnPool {
     admin_call: Arc<dyn AdminCall>,
     cached_app_port: Arc<RwLock<Option<u16>>>,
     app_clients: Arc<tokio::sync::RwLock<HashMap<InstalledAppId, AppWebsocketWithState>>>,
+    /// Optional agent proxy manager for forwarding signals to browser extensions.
+    agent_proxy: Option<AgentProxyManager>,
 }
 
 impl AppConnPool {
@@ -47,6 +53,22 @@ impl AppConnPool {
             admin_call,
             cached_app_port: Default::default(),
             app_clients: Default::default(),
+            agent_proxy: None,
+        }
+    }
+
+    /// Create a new app connection pool with signal forwarding to browser extensions.
+    pub fn with_signal_forwarding(
+        configuration: Configuration,
+        admin_call: Arc<dyn AdminCall>,
+        agent_proxy: AgentProxyManager,
+    ) -> Self {
+        Self {
+            configuration,
+            admin_call,
+            cached_app_port: Default::default(),
+            app_clients: Default::default(),
+            agent_proxy: Some(agent_proxy),
         }
     }
 
@@ -292,6 +314,48 @@ impl AppConnPool {
             client_signer.add_credentials(cell_id, credentials);
         }
 
+        // Subscribe to signals if we have an agent proxy for forwarding
+        if let Some(agent_proxy) = &self.agent_proxy {
+            let agent_proxy = agent_proxy.clone();
+            app_ws
+                .on_signal(move |signal| {
+                    if let Signal::App {
+                        cell_id,
+                        zome_name,
+                        signal: app_signal,
+                    } = signal
+                    {
+                        // Extract DNA hash and agent pubkey from cell_id
+                        let dna_hash = base64::engine::general_purpose::STANDARD
+                            .encode(cell_id.dna_hash().get_raw_39());
+                        let agent_pubkey = base64::engine::general_purpose::STANDARD
+                            .encode(cell_id.agent_pubkey().get_raw_39());
+
+                        // Encode the signal payload as base64
+                        let signal_bytes = app_signal.into_inner().into_vec();
+                        let signal_base64 =
+                            base64::engine::general_purpose::STANDARD.encode(&signal_bytes);
+
+                        let server_msg = ServerMessage::Signal {
+                            dna_hash: dna_hash.clone(),
+                            from_agent: agent_pubkey.clone(),
+                            zome_name: zome_name.to_string(),
+                            signal: signal_base64,
+                        };
+
+                        // Forward the signal to the registered browser agent
+                        let agent_proxy = agent_proxy.clone();
+                        tokio::spawn(async move {
+                            agent_proxy
+                                .send_signal(&dna_hash, &agent_pubkey, server_msg)
+                                .await;
+                        });
+                    }
+                })
+                .await;
+            tracing::debug!("Subscribed to signals for app {}", installed_app_id);
+        }
+
         Ok(app_ws)
     }
 
@@ -333,6 +397,99 @@ impl AppConnPool {
         &self,
     ) -> Arc<tokio::sync::RwLock<HashMap<InstalledAppId, AppWebsocketWithState>>> {
         self.app_clients.clone()
+    }
+
+    /// Check if signal forwarding is enabled for testing purposes.
+    #[cfg(feature = "test-utils")]
+    pub fn has_signal_forwarding(&self) -> bool {
+        self.agent_proxy.is_some()
+    }
+
+    /// Get the agent proxy manager for testing purposes.
+    #[cfg(feature = "test-utils")]
+    pub fn get_agent_proxy(&self) -> Option<&AgentProxyManager> {
+        self.agent_proxy.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MockAdminCall;
+
+    fn test_config() -> Configuration {
+        use crate::config::AllowedAppIds;
+        use std::str::FromStr;
+
+        Configuration {
+            admin_socket_addr: "127.0.0.1:1234".parse().unwrap(),
+            allowed_app_ids: AllowedAppIds::from_str("").unwrap(),
+            allowed_fns: Default::default(),
+            payload_limit_bytes: 1024,
+            max_app_connections: 10,
+            zome_call_timeout: std::time::Duration::from_secs(30),
+            websocket: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_new_without_signal_forwarding() {
+        let config = test_config();
+        let admin_call = Arc::new(MockAdminCall::new());
+        let pool = AppConnPool::new(config, admin_call);
+
+        assert!(!pool.has_signal_forwarding());
+    }
+
+    #[test]
+    fn test_with_signal_forwarding() {
+        let config = test_config();
+        let admin_call = Arc::new(MockAdminCall::new());
+        let agent_proxy = AgentProxyManager::new();
+        let pool = AppConnPool::with_signal_forwarding(config, admin_call, agent_proxy);
+
+        assert!(pool.has_signal_forwarding());
+    }
+
+    #[tokio::test]
+    async fn test_signal_forwarding_uses_shared_agent_proxy() {
+        let config = test_config();
+        let admin_call = Arc::new(MockAdminCall::new());
+        let agent_proxy = AgentProxyManager::new();
+
+        // Register an agent before creating the pool
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        agent_proxy
+            .register("test_dna".to_string(), "test_agent".to_string(), tx)
+            .await;
+
+        let pool = AppConnPool::with_signal_forwarding(config, admin_call, agent_proxy.clone());
+
+        // The pool's agent proxy should be the same instance
+        // Verify by sending a signal through the original and checking it arrives
+        let signal = crate::routes::websocket::ServerMessage::Signal {
+            dna_hash: "test_dna".to_string(),
+            from_agent: "sender".to_string(),
+            zome_name: "test_zome".to_string(),
+            signal: "test_signal".to_string(),
+        };
+
+        // Send through the pool's agent proxy
+        let sent = pool
+            .get_agent_proxy()
+            .unwrap()
+            .send_signal("test_dna", "test_agent", signal)
+            .await;
+        assert!(sent);
+
+        // Verify signal was received
+        let received = rx.recv().await.unwrap();
+        match received {
+            crate::routes::websocket::ServerMessage::Signal { dna_hash, .. } => {
+                assert_eq!(dna_hash, "test_dna");
+            }
+            _ => panic!("Expected Signal message"),
+        }
     }
 }
 

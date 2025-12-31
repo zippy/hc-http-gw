@@ -19,7 +19,7 @@ pub fn hc_http_gateway_router(
     admin_call: Arc<dyn AdminCall>,
     app_call: Arc<dyn AppCall>,
 ) -> Router {
-    hc_http_gateway_router_with_auth(configuration, admin_call, app_call, None)
+    hc_http_gateway_router_with_auth(configuration, admin_call, app_call, None, None)
 }
 
 /// Create the HTTP gateway router with optional authentication.
@@ -28,6 +28,7 @@ pub fn hc_http_gateway_router_with_auth(
     admin_call: Arc<dyn AdminCall>,
     app_call: Arc<dyn AppCall>,
     authenticator: Option<Arc<dyn AgentAuthenticator>>,
+    agent_proxy: Option<AgentProxyManager>,
 ) -> Router {
     let state = AppState {
         configuration,
@@ -35,7 +36,7 @@ pub fn hc_http_gateway_router_with_auth(
         app_call,
         app_info_cache: Default::default(),
         authenticator,
-        agent_proxy: AgentProxyManager::new(),
+        agent_proxy: agent_proxy.unwrap_or_else(AgentProxyManager::new),
     };
 
     let ws_enabled = state.configuration.websocket.enabled;

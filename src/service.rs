@@ -4,7 +4,10 @@ use crate::agent_proxy::AgentProxyManager;
 use crate::app_selection::AppInfoCache;
 use crate::auth::AgentAuthenticator;
 use crate::holochain::{AdminCall, AppCall};
-use crate::{config::Configuration, router::hc_http_gateway_router};
+use crate::{
+    config::Configuration,
+    router::{hc_http_gateway_router, hc_http_gateway_router_with_auth},
+};
 use axum::Router;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -57,6 +60,35 @@ impl HcHttpGatewayService {
         tracing::info!("Configuration: {:?}", configuration);
 
         let router = hc_http_gateway_router(configuration, admin_call, app_call);
+
+        let address = SocketAddr::new(address.into(), port);
+        let listener = TcpListener::bind(address).await?;
+
+        Ok(HcHttpGatewayService { router, listener })
+    }
+
+    /// Create a new service instance with optional authentication and agent proxy.
+    ///
+    /// This constructor allows configuring signal forwarding by passing an `AgentProxyManager`
+    /// that is shared with the `AppConnPool`.
+    pub async fn with_auth(
+        address: impl Into<IpAddr>,
+        port: u16,
+        configuration: Configuration,
+        admin_call: Arc<dyn AdminCall>,
+        app_call: Arc<dyn AppCall>,
+        authenticator: Option<Arc<dyn AgentAuthenticator>>,
+        agent_proxy: Option<AgentProxyManager>,
+    ) -> std::io::Result<Self> {
+        tracing::info!("Configuration: {:?}", configuration);
+
+        let router = hc_http_gateway_router_with_auth(
+            configuration,
+            admin_call,
+            app_call,
+            authenticator,
+            agent_proxy,
+        );
 
         let address = SocketAddr::new(address.into(), port);
         let listener = TcpListener::bind(address).await?;
