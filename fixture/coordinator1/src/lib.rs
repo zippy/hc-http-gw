@@ -107,3 +107,30 @@ pub fn get_limited(request: GetWithLimitRequest) -> ExternResult<Vec<TestType>> 
 fn base() -> AnyLinkableHash {
     EntryHash::from_raw_36(vec![1; 36]).into()
 }
+
+/// Input for creating a known entry
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateKnownEntryInput {
+    pub value: String,
+}
+
+/// Response with both action and entry hashes
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateKnownEntryResponse {
+    pub action_hash: ActionHashB64,
+    pub entry_hash: EntryHashB64,
+}
+
+/// Create an entry with a known, deterministic value
+/// The entry hash will be deterministic based on the content
+#[hdk_extern]
+pub fn create_known_entry(input: CreateKnownEntryInput) -> ExternResult<CreateKnownEntryResponse> {
+    let entry = TestType { value: input.value.clone() };
+    let entry_hash = hash_entry(&entry)?;
+    let action_hash = create_entry(EntryTypes::TestType(entry))?;
+
+    Ok(CreateKnownEntryResponse {
+        action_hash: action_hash.into(),
+        entry_hash: entry_hash.into(),
+    })
+}
