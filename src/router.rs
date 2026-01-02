@@ -1,6 +1,7 @@
 use crate::agent_proxy::AgentProxyManager;
 use crate::auth::AgentAuthenticator;
 use crate::holochain::AppCall;
+use crate::kitsune_proxy::GatewayKitsune;
 use crate::{
     config::Configuration,
     routes::{
@@ -22,13 +23,32 @@ pub fn hc_http_gateway_router(
     hc_http_gateway_router_with_auth(configuration, admin_call, app_call, None, None)
 }
 
-/// Create the HTTP gateway router with optional authentication.
+/// Create the HTTP gateway router with optional authentication and kitsune2.
 pub fn hc_http_gateway_router_with_auth(
     configuration: Configuration,
     admin_call: Arc<dyn AdminCall>,
     app_call: Arc<dyn AppCall>,
     authenticator: Option<Arc<dyn AgentAuthenticator>>,
     agent_proxy: Option<AgentProxyManager>,
+) -> Router {
+    hc_http_gateway_router_full(
+        configuration,
+        admin_call,
+        app_call,
+        authenticator,
+        agent_proxy,
+        None,
+    )
+}
+
+/// Create the HTTP gateway router with all optional features.
+pub fn hc_http_gateway_router_full(
+    configuration: Configuration,
+    admin_call: Arc<dyn AdminCall>,
+    app_call: Arc<dyn AppCall>,
+    authenticator: Option<Arc<dyn AgentAuthenticator>>,
+    agent_proxy: Option<AgentProxyManager>,
+    gateway_kitsune: Option<GatewayKitsune>,
 ) -> Router {
     let state = AppState {
         configuration,
@@ -37,6 +57,7 @@ pub fn hc_http_gateway_router_with_auth(
         app_info_cache: Default::default(),
         authenticator,
         agent_proxy: agent_proxy.unwrap_or_else(AgentProxyManager::new),
+        gateway_kitsune,
     };
 
     let ws_enabled = state.configuration.websocket.enabled;

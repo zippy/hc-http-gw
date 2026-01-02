@@ -14,6 +14,7 @@ use axum::{
     },
     response::Response,
 };
+use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use holochain_types::prelude::AgentPubKey;
 use serde::{Deserialize, Serialize};
@@ -228,6 +229,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // Cleanup: unregister all agents from the proxy manager
     state.agent_proxy.unregister_all(&tx).await;
 
+    // If kitsune2 is configured, leave all agents from their spaces
+    if let Some(ref gateway_kitsune) = state.gateway_kitsune {
+        for (dna_hash, agent_pubkey) in &conn_state.registrations {
+            if let Ok(agent_bytes) = base64::engine::general_purpose::STANDARD.decode(agent_pubkey)
+            {
+                gateway_kitsune.agent_leave(dna_hash, agent_bytes).await;
+            }
+        }
+    }
+
     // Wait for send task to complete
     send_task.abort();
 }
@@ -282,6 +293,30 @@ async fn handle_client_message(
                 .register(dna_hash.clone(), agent_pubkey.clone(), sender.clone())
                 .await;
 
+            // If kitsune2 is configured, join the agent to the space
+            if let Some(ref gateway_kitsune) = app_state.gateway_kitsune {
+                // Decode the agent pubkey from base64 to get raw bytes
+                match base64::engine::general_purpose::STANDARD.decode(&agent_pubkey) {
+                    Ok(agent_bytes) => {
+                        if let Err(e) = gateway_kitsune.agent_join(&dna_hash, agent_bytes).await {
+                            tracing::warn!(
+                                dna = %dna_hash,
+                                agent = %agent_pubkey,
+                                error = %e,
+                                "Failed to join agent to kitsune2 space"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            agent = %agent_pubkey,
+                            error = %e,
+                            "Failed to decode agent pubkey for kitsune2 join"
+                        );
+                    }
+                }
+            }
+
             Some(ServerMessage::Registered { dna_hash, agent_pubkey })
         }
 
@@ -297,6 +332,13 @@ async fn handle_client_message(
 
             // Unregister from agent proxy manager
             app_state.agent_proxy.unregister(&dna_hash, &agent_pubkey).await;
+
+            // If kitsune2 is configured, leave the agent from the space
+            if let Some(ref gateway_kitsune) = app_state.gateway_kitsune {
+                if let Ok(agent_bytes) = base64::engine::general_purpose::STANDARD.decode(&agent_pubkey) {
+                    gateway_kitsune.agent_leave(&dna_hash, agent_bytes).await;
+                }
+            }
 
             Some(ServerMessage::Unregistered { dna_hash, agent_pubkey })
         }
@@ -460,7 +502,7 @@ mod tests {
     mod handler_integration {
         use super::*;
         use crate::agent_proxy::AgentProxyManager;
-        use crate::config::{AllowedAppIds, Configuration, WebSocketConfig};
+        use crate::config::{AllowedAppIds, Configuration, Kitsune2Config, WebSocketConfig};
         use crate::service::AppState;
         use crate::{MockAdminCall, MockAppCall};
         use std::str::FromStr;
@@ -478,6 +520,7 @@ mod tests {
                 max_app_connections: 10,
                 zome_call_timeout: std::time::Duration::from_secs(10),
                 websocket: WebSocketConfig::default(),
+                kitsune2: Kitsune2Config::default(),
             };
 
             AppState {
@@ -487,6 +530,7 @@ mod tests {
                 app_info_cache: Default::default(),
                 authenticator: None,
                 agent_proxy: AgentProxyManager::new(),
+                gateway_kitsune: None,
             }
         }
 

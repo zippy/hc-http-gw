@@ -429,6 +429,7 @@ mod tests {
             max_app_connections: 10,
             zome_call_timeout: std::time::Duration::from_secs(30),
             websocket: Default::default(),
+            kitsune2: Default::default(),
         }
     }
 

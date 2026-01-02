@@ -25,16 +25,20 @@
 //! ```
 
 use crate::agent_proxy::AgentProxyManager;
+use crate::proxy_agent::ProxyAgent;
 use crate::routes::websocket::ServerMessage;
 use base64::Engine;
 use bytes::Bytes;
 use holochain_p2p::WireMessage;
 use holochain_types::prelude::{AgentPubKey, ExternIO};
 use kitsune2_api::{
-    BoxFut, DynKitsune, DynSpaceHandler, K2Result, KitsuneHandler, SpaceHandler, SpaceId, Url,
+    AgentId, BoxFut, DynKitsune, DynLocalAgent, DynSpace, DynSpaceHandler, K2Result,
+    KitsuneHandler, SpaceHandler, SpaceId, Url,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
 
 /// Convert a SpaceId to a base64-encoded DnaHash string.
 ///
@@ -263,6 +267,252 @@ impl KitsuneProxyBuilder {
 
         info!("Gateway kitsune2 instance created");
         Ok(kitsune)
+    }
+}
+
+/// Gateway kitsune2 manager that handles space and agent lifecycle.
+///
+/// This wraps a `DynKitsune` instance and provides methods to:
+/// - Join browser agents to spaces when they register
+/// - Leave agents from spaces when they disconnect
+/// - Track active spaces and agents
+///
+/// # Example
+///
+/// ```ignore
+/// let gateway_kitsune = GatewayKitsune::new(kitsune);
+///
+/// // When browser agent registers via WebSocket
+/// gateway_kitsune.agent_join(&dna_hash_b64, agent_pubkey_bytes).await?;
+///
+/// // When browser agent disconnects
+/// gateway_kitsune.agent_leave(&dna_hash_b64, agent_pubkey_bytes).await;
+/// ```
+#[derive(Clone)]
+pub struct GatewayKitsune {
+    kitsune: DynKitsune,
+    /// Active spaces by DNA hash (base64).
+    spaces: Arc<RwLock<HashMap<String, DynSpace>>>,
+    /// Registered agents by (dna_b64, agent_b64).
+    /// Value is the ProxyAgent for potential future use.
+    agents: Arc<RwLock<HashMap<(String, String), Arc<ProxyAgent>>>>,
+}
+
+impl std::fmt::Debug for GatewayKitsune {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayKitsune").finish_non_exhaustive()
+    }
+}
+
+impl GatewayKitsune {
+    /// Create a new gateway kitsune manager.
+    pub fn new(kitsune: DynKitsune) -> Self {
+        Self {
+            kitsune,
+            spaces: Arc::new(RwLock::new(HashMap::new())),
+            agents: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Convert a base64-encoded DNA hash to a SpaceId.
+    fn dna_b64_to_space_id(dna_b64: &str) -> Result<SpaceId, base64::DecodeError> {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(dna_b64)?;
+        Ok(SpaceId::from(Bytes::from(bytes)))
+    }
+
+    /// Get or create a space for a DNA.
+    async fn get_or_create_space(&self, dna_b64: &str) -> Result<DynSpace, String> {
+        // Check if space exists
+        {
+            let spaces = self.spaces.read().await;
+            if let Some(space) = spaces.get(dna_b64) {
+                return Ok(space.clone());
+            }
+        }
+
+        // Create new space
+        let space_id = Self::dna_b64_to_space_id(dna_b64)
+            .map_err(|e| format!("Invalid DNA hash base64: {}", e))?;
+
+        let space = self
+            .kitsune
+            .space(space_id)
+            .await
+            .map_err(|e| format!("Failed to create space: {}", e))?;
+
+        // Store space
+        {
+            let mut spaces = self.spaces.write().await;
+            spaces.insert(dna_b64.to_string(), space.clone());
+        }
+
+        info!(dna = %dna_b64, "Created kitsune2 space for DNA");
+        Ok(space)
+    }
+
+    /// Join a browser agent to a DNA's kitsune2 space.
+    ///
+    /// This creates a ProxyAgent and registers it with the space,
+    /// enabling the gateway to receive signals on behalf of this agent.
+    ///
+    /// # Arguments
+    ///
+    /// * `dna_b64` - Base64-encoded DNA hash
+    /// * `agent_pubkey` - Raw 32-byte Ed25519 public key
+    pub async fn agent_join(
+        &self,
+        dna_b64: &str,
+        agent_pubkey: impl Into<Bytes>,
+    ) -> Result<(), String> {
+        let agent_bytes = agent_pubkey.into();
+        let agent_b64 = base64::engine::general_purpose::STANDARD.encode(&agent_bytes);
+
+        // Check if already registered
+        let key = (dna_b64.to_string(), agent_b64.clone());
+        {
+            let agents = self.agents.read().await;
+            if agents.contains_key(&key) {
+                debug!(
+                    dna = %dna_b64,
+                    agent = %agent_b64,
+                    "Agent already joined to space"
+                );
+                return Ok(());
+            }
+        }
+
+        // Get or create space
+        let space = self.get_or_create_space(dna_b64).await?;
+
+        // Create proxy agent
+        let proxy_agent = Arc::new(ProxyAgent::new(agent_bytes));
+
+        // Join space
+        space
+            .local_agent_join(proxy_agent.clone() as DynLocalAgent)
+            .await
+            .map_err(|e| format!("Failed to join agent to space: {}", e))?;
+
+        // Store agent
+        {
+            let mut agents = self.agents.write().await;
+            agents.insert(key, proxy_agent);
+        }
+
+        info!(
+            dna = %dna_b64,
+            agent = %agent_b64,
+            "Browser agent joined kitsune2 space"
+        );
+        Ok(())
+    }
+
+    /// Remove a browser agent from a DNA's kitsune2 space.
+    ///
+    /// This publishes a tombstone agent info to the network and removes
+    /// the agent from the local tracking.
+    ///
+    /// # Arguments
+    ///
+    /// * `dna_b64` - Base64-encoded DNA hash
+    /// * `agent_pubkey` - Raw 32-byte Ed25519 public key
+    pub async fn agent_leave(&self, dna_b64: &str, agent_pubkey: impl Into<Bytes>) {
+        let agent_bytes = agent_pubkey.into();
+        let agent_b64 = base64::engine::general_purpose::STANDARD.encode(&agent_bytes);
+
+        let key = (dna_b64.to_string(), agent_b64.clone());
+
+        // Remove from tracking
+        let proxy_agent = {
+            let mut agents = self.agents.write().await;
+            agents.remove(&key)
+        };
+
+        if proxy_agent.is_none() {
+            debug!(
+                dna = %dna_b64,
+                agent = %agent_b64,
+                "Agent not found in space (already left?)"
+            );
+            return;
+        }
+
+        // Get space (if it exists)
+        let space = {
+            let spaces = self.spaces.read().await;
+            spaces.get(dna_b64).cloned()
+        };
+
+        if let Some(space) = space {
+            // Create AgentId from bytes
+            let agent_id = AgentId::from(agent_bytes);
+
+            // Leave space (publishes tombstone)
+            space.local_agent_leave(agent_id).await;
+
+            info!(
+                dna = %dna_b64,
+                agent = %agent_b64,
+                "Browser agent left kitsune2 space"
+            );
+        }
+
+        // Check if space has no more agents, and clean up if so
+        self.maybe_cleanup_space(dna_b64).await;
+    }
+
+    /// Remove a space if it has no more registered agents.
+    async fn maybe_cleanup_space(&self, dna_b64: &str) {
+        let has_agents = {
+            let agents = self.agents.read().await;
+            agents.keys().any(|(dna, _)| dna == dna_b64)
+        };
+
+        if !has_agents {
+            let mut spaces = self.spaces.write().await;
+            if spaces.remove(dna_b64).is_some() {
+                info!(dna = %dna_b64, "Removed empty kitsune2 space");
+            }
+        }
+    }
+
+    /// Leave all agents from all spaces.
+    ///
+    /// Called during gateway shutdown to publish tombstones for all agents.
+    pub async fn shutdown(&self) {
+        let agents: Vec<_> = {
+            let agents = self.agents.read().await;
+            agents.keys().cloned().collect()
+        };
+
+        for (dna_b64, agent_b64) in agents {
+            let agent_bytes = match base64::engine::general_purpose::STANDARD.decode(&agent_b64) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    error!(agent = %agent_b64, %e, "Failed to decode agent during shutdown");
+                    continue;
+                }
+            };
+            self.agent_leave(&dna_b64, agent_bytes).await;
+        }
+
+        info!("Gateway kitsune2 shutdown complete");
+    }
+
+    /// Get the number of registered agents.
+    pub async fn agent_count(&self) -> usize {
+        self.agents.read().await.len()
+    }
+
+    /// Get the number of active spaces.
+    pub async fn space_count(&self) -> usize {
+        self.spaces.read().await.len()
+    }
+
+    /// Check if an agent is registered in a space.
+    pub async fn is_agent_joined(&self, dna_b64: &str, agent_b64: &str) -> bool {
+        let key = (dna_b64.to_string(), agent_b64.to_string());
+        self.agents.read().await.contains_key(&key)
     }
 }
 

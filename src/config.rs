@@ -59,6 +59,8 @@ pub struct Configuration {
     pub zome_call_timeout: std::time::Duration,
     /// WebSocket configuration for browser extension connections.
     pub websocket: WebSocketConfig,
+    /// Kitsune2 network configuration for remote signal forwarding.
+    pub kitsune2: Kitsune2Config,
 }
 
 /// WebSocket configuration for browser extension connections.
@@ -83,6 +85,23 @@ impl Default for WebSocketConfig {
             idle_timeout: DEFAULT_WS_IDLE_TIMEOUT,
         }
     }
+}
+
+/// Kitsune2 network configuration for remote signal forwarding.
+///
+/// When configured, the gateway will participate in the kitsune2 p2p network
+/// on behalf of browser agents, enabling remote signal delivery.
+#[derive(Debug, Clone, Default)]
+pub struct Kitsune2Config {
+    /// Enable kitsune2 networking.
+    /// When enabled, the gateway will join the kitsune2 network.
+    pub enabled: bool,
+    /// Bootstrap server URL (e.g., "https://bootstrap.holo.host").
+    /// Required when enabled.
+    pub bootstrap_url: Option<String>,
+    /// Signal server URL for tx5 transport (e.g., "wss://signal.holo.host").
+    /// Required when enabled.
+    pub signal_url: Option<String>,
 }
 
 impl Configuration {
@@ -139,6 +158,7 @@ impl Configuration {
             max_app_connections,
             zome_call_timeout,
             websocket: WebSocketConfig::default(),
+            kitsune2: Kitsune2Config::default(),
         })
     }
 }
@@ -299,6 +319,7 @@ mod tests {
             max_app_connections: DEFAULT_MAX_APP_CONNECTIONS,
             zome_call_timeout: DEFAULT_ZOME_CALL_TIMEOUT,
             websocket: WebSocketConfig::default(),
+            kitsune2: Kitsune2Config::default(),
         }
     }
 

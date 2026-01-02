@@ -4,6 +4,7 @@ use crate::agent_proxy::AgentProxyManager;
 use crate::app_selection::AppInfoCache;
 use crate::auth::AgentAuthenticator;
 use crate::holochain::{AdminCall, AppCall};
+use crate::kitsune_proxy::GatewayKitsune;
 use crate::{
     config::Configuration,
     router::{hc_http_gateway_router, hc_http_gateway_router_with_auth},
@@ -35,6 +36,8 @@ pub struct AppState {
     pub authenticator: Option<Arc<dyn AgentAuthenticator>>,
     /// Agent proxy manager for WebSocket connections.
     pub agent_proxy: AgentProxyManager,
+    /// Optional kitsune2 network manager for remote signal forwarding.
+    pub gateway_kitsune: Option<GatewayKitsune>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -44,6 +47,7 @@ impl std::fmt::Debug for AppState {
             .field("app_info_cache", &self.app_info_cache)
             .field("has_authenticator", &self.authenticator.is_some())
             .field("agent_proxy", &self.agent_proxy)
+            .field("has_gateway_kitsune", &self.gateway_kitsune.is_some())
             .finish()
     }
 }

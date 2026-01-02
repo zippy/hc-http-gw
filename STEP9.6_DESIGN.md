@@ -483,3 +483,132 @@ But the gateway kitsune2 instance is not yet:
 3. Joining spaces for registered browser agents
 
 These require implementing ProxyAgent (LocalAgent trait) for agent registration.
+
+---
+
+## ProxyAgent Implementation (2026-01-01)
+
+### What Was Built
+
+Created `src/proxy_agent.rs` with:
+
+1. **ProxyAgent** - Implements `LocalAgent` trait for browser agents
+   - Holds the agent's public key (`AgentId`)
+   - Implements `Signer` trait (returns error - signing delegated to browser)
+   - Zero-arc storage arcs (browser agents don't store DHT data)
+   - Callback registration for kitsune2 state changes
+
+### Key Design Decisions
+
+1. **Signing returns error**: Since private keys are in the browser, the gateway's
+   ProxyAgent cannot sign locally. The `sign()` method returns an error. For agent
+   registration with bootstrap, we'll use pre-signed AgentInfo (browser signs during
+   WebSocket registration).
+
+2. **Zero-arc agents**: Browser agents have `DhtArc::Empty` for both current and
+   target storage arcs. They don't store or serve DHT data.
+
+### Tests Added
+
+6 unit tests in `proxy_agent::tests`:
+- `test_proxy_agent_creation`
+- `test_proxy_agent_from_base64`
+- `test_proxy_agent_storage_arcs`
+- `test_proxy_agent_callback`
+- `test_proxy_agent_sign_returns_error`
+- `test_proxy_agent_debug`
+
+---
+
+## Space Lifecycle Implementation (2026-01-01)
+
+### What Was Built
+
+Added `GatewayKitsune` to `src/kitsune_proxy.rs`:
+
+1. **GatewayKitsune** - Manages kitsune2 spaces and agent lifecycle
+   - Wraps `DynKitsune` instance
+   - Tracks active spaces by DNA hash
+   - Tracks registered agents by (dna_b64, agent_b64)
+
+2. **Key methods**:
+   - `agent_join(dna_b64, agent_pubkey)` - Join agent to space
+   - `agent_leave(dna_b64, agent_pubkey)` - Leave agent from space
+   - `shutdown()` - Leave all agents (publishes tombstones)
+   - `is_agent_joined()`, `agent_count()`, `space_count()` - Query state
+
+3. **Space lifecycle**:
+   - Spaces created on-demand when first agent joins
+   - Spaces removed when last agent leaves
+   - Agents tracked with Arc<ProxyAgent> for potential future use
+
+### Current Test Count
+
+12 tests total:
+- 6 in `kitsune_proxy::tests`
+- 6 in `proxy_agent::tests`
+
+### Remaining Work
+
+1. ~~ProxyAgent (LocalAgent trait)~~ DONE
+2. ~~Space lifecycle management~~ DONE
+3. ~~Start gateway kitsune2 instance in service startup~~ DONE
+4. **Integration test with SweetConductor**
+
+---
+
+## Gateway Kitsune2 Integration (2026-01-01)
+
+### What Was Built
+
+1. **Configuration** (`src/config.rs`):
+   - Added `Kitsune2Config` with `enabled`, `bootstrap_url`, `signal_url` fields
+   - Added `kitsune2` field to `Configuration`
+
+2. **AppState** (`src/service.rs`):
+   - Added optional `gateway_kitsune: Option<GatewayKitsune>` field
+   - Updated Debug impl to show `has_gateway_kitsune`
+
+3. **Router** (`src/router.rs`):
+   - Added `hc_http_gateway_router_full` that accepts all optional features
+   - Modified `hc_http_gateway_router_with_auth` to call through to `_full`
+
+4. **WebSocket Handler** (`src/routes/websocket.rs`):
+   - On `Register`: calls `gateway_kitsune.agent_join()` if kitsune2 enabled
+   - On `Unregister`: calls `gateway_kitsune.agent_leave()` if kitsune2 enabled
+   - On disconnect: leaves all registered agents from kitsune2 spaces
+
+### Usage Example
+
+```rust
+// Create kitsune2 instance if configured
+let gateway_kitsune = if config.kitsune2.enabled {
+    let proxy = KitsuneProxy::new(agent_proxy.clone());
+    let kitsune = KitsuneProxyBuilder::new(proxy)
+        .with_bootstrap_url(config.kitsune2.bootstrap_url.as_ref().unwrap())
+        .with_signal_url(config.kitsune2.signal_url.as_ref().unwrap())
+        .build()
+        .await?;
+    Some(GatewayKitsune::new(kitsune))
+} else {
+    None
+};
+
+// Create router with all features
+let router = hc_http_gateway_router_full(
+    config,
+    admin_call,
+    app_call,
+    authenticator,
+    Some(agent_proxy),
+    gateway_kitsune,
+);
+```
+
+### Test Count
+
+112 library tests passing:
+- 6 kitsune_proxy tests
+- 6 proxy_agent tests
+- 8 websocket handler integration tests
+- 92 other gateway tests
