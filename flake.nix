@@ -32,6 +32,8 @@
               pkgs.perl
               pkgs.go
               pkgs.cmake
+              pkgs.llvmPackages.clang
+              pkgs.llvmPackages.libclang
               rustFromFile
             ];
 

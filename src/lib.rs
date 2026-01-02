@@ -4,6 +4,8 @@
 
 /// Agent proxy manager for browser extension connections.
 pub mod agent_proxy;
+/// Kitsune2 proxy for browser extension agents.
+pub mod kitsune_proxy;
 mod app_selection;
 /// Authentication module for agent verification.
 pub mod auth;
@@ -24,4 +26,5 @@ pub use config::*;
 pub use error::{ErrorResponse, HcHttpGatewayError, HcHttpGatewayResult};
 pub use holochain::*;
 pub use resolve::resolve_address_from_url;
+pub use kitsune_proxy::{KitsuneProxy, KitsuneProxyBuilder};
 pub use service::HcHttpGatewayService;
