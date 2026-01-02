@@ -80,6 +80,9 @@ pub struct PayloadQuery {
     pub payload: Option<String>,
 }
 
+/// Zome call endpoint handler.
+///
+/// Executes a zome function call and returns the result as JSON.
 #[tracing::instrument(skip(state))]
 pub async fn zome_call(
     params: ZomeCallParams,

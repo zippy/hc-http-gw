@@ -1,3 +1,6 @@
+/// Health check endpoint handler.
+///
+/// Returns "Ok" if the gateway is running.
 #[tracing::instrument]
 pub async fn health_check() -> &'static str {
     "Ok"

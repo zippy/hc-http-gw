@@ -16,7 +16,8 @@ mod error;
 mod holochain;
 mod resolve;
 mod router;
-mod routes;
+/// HTTP routes for the gateway.
+pub mod routes;
 mod service;
 mod transcode;
 

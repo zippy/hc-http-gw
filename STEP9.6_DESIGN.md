@@ -612,3 +612,42 @@ let router = hc_http_gateway_router_full(
 - 6 proxy_agent tests
 - 8 websocket handler integration tests
 - 92 other gateway tests
+
+---
+
+## Integration Tests (2026-01-01)
+
+### What Was Built
+
+Created `tests/kitsune_integration.rs` with 5 tests:
+
+1. **test_gateway_kitsune_agent_lifecycle**
+   - Verifies agent join/leave updates counts
+   - Verifies space cleanup when no agents remain
+
+2. **test_signal_forwarding_integration**
+   - Simulates recv_notify receiving RemoteSignalEvt
+   - Verifies signal forwarded to registered WebSocket client
+   - Validates signal format (dna_hash, from_agent, zome_name, signal)
+
+3. **test_signal_not_forwarded_to_unregistered_agent**
+   - Verifies signals for unregistered agents are silently dropped
+
+4. **test_multiple_agents_same_dna**
+   - Verifies signals routed to correct agent
+   - Agent1 gets signals addressed to Agent1
+   - Agent2 gets signals addressed to Agent2
+
+5. **test_wire_message_batch_decoding**
+   - Verifies multiple signals in a batch are all processed
+
+### Changes Made
+
+- Made `routes` module public for test access to `ServerMessage`
+- Added documentation to `health_check` and `zome_call` functions
+
+### Final Test Count
+
+117 tests total:
+- 112 library tests
+- 5 integration tests in kitsune_integration.rs
