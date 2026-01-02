@@ -426,8 +426,60 @@ pkgs.llvmPackages.libclang
 
 ### Next Steps for Full Implementation
 
-1. **Wire forwarding to AgentProxyManager**: The spike logs signals but doesn't forward yet
+1. ~~**Wire forwarding to AgentProxyManager**: The spike logs signals but doesn't forward yet~~ DONE
 2. **LocalAgent implementation**: Need ProxyAgent that delegates signing to browser
 3. **Space lifecycle**: Create/join spaces when browser agents register
 4. **Bootstrap integration**: Register proxy agents with bootstrap server
 5. **Test with real conductor**: Integration test with SweetConductor sending signals
+
+---
+
+## Signal Forwarding Implementation (2026-01-01)
+
+### Changes Made
+
+Added signal forwarding from `recv_notify` to `AgentProxyManager`:
+
+1. **Conversion utilities** (in `kitsune_proxy.rs`):
+   - `space_id_to_dna_b64()` - Convert SpaceId bytes to base64 DnaHash
+   - `agent_to_b64()` - Convert AgentPubKey to base64
+   - `signal_to_b64()` - Convert ExternIO payload to base64
+
+2. **Updated `handle_wire_message()`**:
+   - Extracts `to_agent` and `zome_call_params_serialized` from `RemoteSignalEvt`
+   - Creates `ServerMessage::Signal` with:
+     - `dna_hash`: base64-encoded SpaceId
+     - `from_agent`: "remote" (sender agent not available in wire message)
+     - `zome_name`: "recv_remote_signal" (marker for remote signals)
+     - `signal`: base64-encoded payload
+   - Uses `tokio::spawn` to call async `agent_proxy.send_signal()`
+
+### Tests Added
+
+2 new async tests:
+- `test_signal_forwarding_to_registered_agent` - Verifies signals are forwarded to registered agents
+- `test_signal_not_forwarded_to_unregistered_agent` - Verifies no crash when agent not registered
+
+### Current Test Count
+
+6 tests in `kitsune_proxy::tests`:
+- `test_kitsune_proxy_creation`
+- `test_space_handler_creation`
+- `test_decode_remote_signal_evt`
+- `test_space_handler_recv_notify`
+- `test_signal_forwarding_to_registered_agent`
+- `test_signal_not_forwarded_to_unregistered_agent`
+
+### Remaining Work
+
+The signal forwarding path is complete:
+```
+recv_notify(RemoteSignalEvt) → decode → AgentProxyManager.send_signal() → WebSocket
+```
+
+But the gateway kitsune2 instance is not yet:
+1. Started in gateway startup
+2. Connected to the same bootstrap/signal servers as the conductor
+3. Joining spaces for registered browser agents
+
+These require implementing ProxyAgent (LocalAgent trait) for agent registration.

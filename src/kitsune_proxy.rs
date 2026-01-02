@@ -25,13 +25,33 @@
 //! ```
 
 use crate::agent_proxy::AgentProxyManager;
+use crate::routes::websocket::ServerMessage;
+use base64::Engine;
 use bytes::Bytes;
 use holochain_p2p::WireMessage;
+use holochain_types::prelude::{AgentPubKey, ExternIO};
 use kitsune2_api::{
     BoxFut, DynKitsune, DynSpaceHandler, K2Result, KitsuneHandler, SpaceHandler, SpaceId, Url,
 };
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+/// Convert a SpaceId to a base64-encoded DnaHash string.
+///
+/// SpaceId and DnaHash are the same bytes (32-byte hash + 4-byte type prefix + 3-byte DHT location).
+fn space_id_to_dna_b64(space_id: &SpaceId) -> String {
+    base64::engine::general_purpose::STANDARD.encode(space_id.as_ref())
+}
+
+/// Convert an AgentPubKey to a base64-encoded string.
+fn agent_to_b64(agent: &AgentPubKey) -> String {
+    base64::engine::general_purpose::STANDARD.encode(agent.get_raw_39())
+}
+
+/// Convert signal payload (ExternIO) to a base64-encoded string.
+fn signal_to_b64(signal: &ExternIO) -> String {
+    base64::engine::general_purpose::STANDARD.encode(&signal.0)
+}
 
 /// Top-level kitsune2 handler for the gateway.
 ///
@@ -118,7 +138,7 @@ impl ProxySpaceHandler {
             WireMessage::RemoteSignalEvt {
                 to_agent,
                 zome_call_params_serialized,
-                signature,
+                signature: _,
             } => {
                 info!(
                     ?to_agent,
@@ -127,20 +147,36 @@ impl ProxySpaceHandler {
                     "Received RemoteSignalEvt for browser agent"
                 );
 
-                // TODO: Forward to AgentProxyManager
-                // The space_id maps to a DnaHash
-                // The to_agent is the target AgentPubKey
-                //
-                // We need to:
-                // 1. Convert space_id to DnaHash (they're the same bytes)
-                // 2. Check if to_agent is registered in our proxy
-                // 3. Forward the signal via WebSocket
-                //
-                // For now, just log that we received it
-                debug!(
-                    ?signature,
-                    "Signal signature present (for verification)"
-                );
+                // Convert to base64 strings for the WebSocket message
+                let dna_hash = space_id_to_dna_b64(&self.space_id);
+                let agent_pubkey = agent_to_b64(&to_agent);
+                let signal_data = signal_to_b64(&zome_call_params_serialized);
+
+                // Create the server message
+                // Note: from_agent is "remote" since we don't have the sender's
+                // agent key in RemoteSignalEvt (it's embedded in zome_call_params)
+                let server_msg = ServerMessage::Signal {
+                    dna_hash: dna_hash.clone(),
+                    from_agent: "remote".to_string(),
+                    zome_name: "recv_remote_signal".to_string(),
+                    signal: signal_data,
+                };
+
+                // Forward to the registered browser agent via AgentProxyManager
+                // spawn a task since send_signal is async and recv_notify is sync
+                let agent_proxy = self.agent_proxy.clone();
+                tokio::spawn(async move {
+                    let sent = agent_proxy
+                        .send_signal(&dna_hash, &agent_pubkey, server_msg)
+                        .await;
+                    if sent {
+                        debug!(
+                            dna = %dna_hash,
+                            agent = %agent_pubkey,
+                            "Remote signal forwarded to browser agent"
+                        );
+                    }
+                });
             }
             other => {
                 debug!(
@@ -296,8 +332,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_space_handler_recv_notify() {
+    #[tokio::test]
+    async fn test_space_handler_recv_notify() {
         // Create handler
         let agent_proxy = AgentProxyManager::new();
         let handler = ProxySpaceHandler {
@@ -320,7 +356,105 @@ mod tests {
 
         let result = handler.recv_notify(from_peer, space_id, encoded);
         assert!(result.is_ok());
+    }
 
-        // The signal should be logged (but not forwarded yet - that's TODO)
+    #[tokio::test]
+    async fn test_signal_forwarding_to_registered_agent() {
+        use tokio::sync::mpsc;
+
+        // Create handler with agent proxy
+        let agent_proxy = AgentProxyManager::new();
+        let (tx, mut rx) = mpsc::channel(32);
+
+        // Calculate what the base64 values will be
+        let space_bytes = vec![0u8; 32];
+        let dna_hash_b64 =
+            base64::engine::general_purpose::STANDARD.encode(&space_bytes);
+        let agent_bytes = vec![0xdb; 36];
+        // AgentPubKey adds 3 bytes (type prefix) to make 39 bytes
+        let to_agent = AgentPubKey::from_raw_36(agent_bytes.clone());
+        let agent_pubkey_b64 =
+            base64::engine::general_purpose::STANDARD.encode(to_agent.get_raw_39());
+
+        // Register the agent
+        agent_proxy
+            .register(dna_hash_b64.clone(), agent_pubkey_b64.clone(), tx)
+            .await;
+
+        // Create handler
+        let handler = ProxySpaceHandler {
+            space_id: SpaceId::from(Bytes::from(space_bytes)),
+            agent_proxy: agent_proxy.clone(),
+        };
+
+        // Create a RemoteSignalEvt
+        let zome_call_params = ExternIO::encode(b"test signal data").unwrap();
+        let signature = test_signature();
+
+        let wire_msg =
+            WireMessage::remote_signal_evt(to_agent, zome_call_params.clone(), signature);
+        let batch: Vec<&WireMessage> = vec![&wire_msg];
+        let encoded = WireMessage::encode_batch(&batch).expect("encode");
+
+        // Call recv_notify
+        let from_peer = Url::from_str("ws://localhost:5000").unwrap();
+        let space_id = SpaceId::from(Bytes::from(vec![0u8; 32]));
+
+        let result = handler.recv_notify(from_peer, space_id, encoded);
+        assert!(result.is_ok());
+
+        // Give the spawned task time to run
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Verify the signal was forwarded
+        let received = rx.try_recv().expect("Expected to receive forwarded signal");
+        match received {
+            crate::routes::websocket::ServerMessage::Signal {
+                dna_hash,
+                from_agent,
+                zome_name,
+                signal,
+            } => {
+                assert_eq!(dna_hash, dna_hash_b64);
+                assert_eq!(from_agent, "remote");
+                assert_eq!(zome_name, "recv_remote_signal");
+                // Signal should be base64-encoded version of the zome_call_params
+                let expected_signal =
+                    base64::engine::general_purpose::STANDARD.encode(&zome_call_params.0);
+                assert_eq!(signal, expected_signal);
+            }
+            other => panic!("Expected Signal message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_signal_not_forwarded_to_unregistered_agent() {
+        // Create handler with agent proxy (no agents registered)
+        let agent_proxy = AgentProxyManager::new();
+
+        // Create handler
+        let handler = ProxySpaceHandler {
+            space_id: test_space_id(),
+            agent_proxy: agent_proxy.clone(),
+        };
+
+        // Create a RemoteSignalEvt for an unregistered agent
+        let to_agent = AgentPubKey::from_raw_36(vec![0xdb; 36]);
+        let zome_call_params = ExternIO::encode(b"signal for nobody").unwrap();
+        let signature = test_signature();
+
+        let wire_msg = WireMessage::remote_signal_evt(to_agent, zome_call_params, signature);
+        let batch: Vec<&WireMessage> = vec![&wire_msg];
+        let encoded = WireMessage::encode_batch(&batch).expect("encode");
+
+        // Call recv_notify - should succeed (doesn't fail on unregistered agent)
+        let from_peer = Url::from_str("ws://localhost:5000").unwrap();
+        let space_id = test_space_id();
+
+        let result = handler.recv_notify(from_peer, space_id, encoded);
+        assert!(result.is_ok());
+
+        // Verify no crash - the signal is just dropped for unregistered agents
+        assert_eq!(agent_proxy.registration_count().await, 0);
     }
 }
