@@ -6,7 +6,7 @@ use crate::{
     config::Configuration,
     routes::{
         auth_challenge, auth_verify, dht_count_links, dht_get_details, dht_get_links,
-        dht_get_record, health_check, ws_handler, zome_call,
+        dht_get_record, health_check, test_signal, ws_handler, zome_call,
     },
     service::AppState,
     AdminCall,
@@ -72,6 +72,8 @@ pub fn hc_http_gateway_router_full(
         .route("/dht/{dna_hash}/details/{hash}", get(dht_get_details))
         .route("/dht/{dna_hash}/links", get(dht_get_links))
         .route("/dht/{dna_hash}/links/count", get(dht_count_links))
+        // Test endpoint for signal testing (development only)
+        .route("/test/signal", post(test_signal))
         // Zome call endpoint
         .route(
             "/{dna_hash}/{coordinator_identifier}/{zome_name}/{fn_name}",
