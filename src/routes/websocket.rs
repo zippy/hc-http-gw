@@ -16,8 +16,9 @@ use axum::{
 };
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
-use holochain_types::prelude::AgentPubKey;
+use holochain_types::prelude::{AgentPubKey, DnaHash};
 use serde::{Deserialize, Serialize};
+use std::convert::TryFrom;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::time::interval;
@@ -47,6 +48,15 @@ pub enum ClientMessage {
     },
     /// Ping for heartbeat.
     Ping,
+    /// Response to a signing request.
+    SignResponse {
+        /// Request ID to correlate with the original request.
+        request_id: String,
+        /// The signature (base64 encoded), if successful.
+        signature: Option<String>,
+        /// Error message if signing failed.
+        error: Option<String>,
+    },
 }
 
 /// Messages sent from gateway to browser.
@@ -92,6 +102,15 @@ pub enum ServerMessage {
         /// Error description.
         message: String,
     },
+    /// Request browser to sign data with agent's private key.
+    SignRequest {
+        /// Unique request ID for correlating response.
+        request_id: String,
+        /// Agent public key that should sign (base64 encoded).
+        agent_pubkey: String,
+        /// Data to sign (base64 encoded bytes).
+        message: String,
+    },
 }
 
 /// Connection state for a WebSocket client.
@@ -103,8 +122,8 @@ struct ConnectionState {
     agent: Option<AgentPubKey>,
     /// Last activity timestamp.
     last_activity: Instant,
-    /// Registered agent-DNA pairs.
-    registrations: Vec<(String, String)>, // (dna_hash, agent_pubkey)
+    /// Registered agent-DNA pairs using proper Holochain types.
+    registrations: Vec<(DnaHash, AgentPubKey)>,
 }
 
 impl Default for ConnectionState {
@@ -163,9 +182,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         conn_state.last_activity = Instant::now();
+                        // Update last_pong on any text message - proves client is alive
+                        // This handles application-level heartbeat (client sends { type: "ping" })
+                        last_pong = Instant::now();
 
                         match serde_json::from_str::<ClientMessage>(&text) {
                             Ok(client_msg) => {
+                                tracing::debug!(?client_msg, "Received WebSocket message");
                                 let response = handle_client_message(
                                     client_msg,
                                     &mut conn_state,
@@ -232,10 +255,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // If kitsune2 is configured, leave all agents from their spaces
     if let Some(ref gateway_kitsune) = state.gateway_kitsune {
         for (dna_hash, agent_pubkey) in &conn_state.registrations {
-            if let Ok(agent_bytes) = base64::engine::general_purpose::STANDARD.decode(agent_pubkey)
-            {
-                gateway_kitsune.agent_leave(dna_hash, agent_bytes).await;
-            }
+            gateway_kitsune.agent_leave(dna_hash, agent_pubkey).await;
         }
     }
 
@@ -281,8 +301,38 @@ async fn handle_client_message(
                 });
             }
 
+            // Parse browser base64 strings to proper Holochain types at the boundary.
+            // HoloHash uses URL-safe base64 with a 'u' prefix.
+            let dna = match DnaHash::try_from(dna_hash.as_str()) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(
+                        dna = %dna_hash,
+                        error = ?e,
+                        "Failed to parse DNA hash"
+                    );
+                    return Some(ServerMessage::Error {
+                        message: format!("Invalid DNA hash: {:?}", e),
+                    });
+                }
+            };
+
+            let agent = match AgentPubKey::try_from(agent_pubkey.as_str()) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %agent_pubkey,
+                        error = ?e,
+                        "Failed to parse agent pubkey"
+                    );
+                    return Some(ServerMessage::Error {
+                        message: format!("Invalid agent pubkey: {:?}", e),
+                    });
+                }
+            };
+
             // Check if already registered locally
-            let key = (dna_hash.clone(), agent_pubkey.clone());
+            let key = (dna.clone(), agent.clone());
             if !state.registrations.contains(&key) {
                 state.registrations.push(key);
             }
@@ -290,30 +340,30 @@ async fn handle_client_message(
             // Register with agent proxy manager to receive signals
             app_state
                 .agent_proxy
-                .register(dna_hash.clone(), agent_pubkey.clone(), sender.clone())
+                .register(dna.clone(), agent.clone(), sender.clone())
                 .await;
 
             // If kitsune2 is configured, join the agent to the space
             if let Some(ref gateway_kitsune) = app_state.gateway_kitsune {
-                // Decode the agent pubkey from base64 to get raw bytes
-                match base64::engine::general_purpose::STANDARD.decode(&agent_pubkey) {
-                    Ok(agent_bytes) => {
-                        if let Err(e) = gateway_kitsune.agent_join(&dna_hash, agent_bytes).await {
-                            tracing::warn!(
-                                dna = %dna_hash,
-                                agent = %agent_pubkey,
-                                error = %e,
-                                "Failed to join agent to kitsune2 space"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            agent = %agent_pubkey,
-                            error = %e,
-                            "Failed to decode agent pubkey for kitsune2 join"
-                        );
-                    }
+                tracing::info!(
+                    dna = %dna,
+                    agent = %agent,
+                    "Joining agent to kitsune2 space"
+                );
+
+                if let Err(e) = gateway_kitsune.agent_join(&dna, &agent).await {
+                    tracing::warn!(
+                        dna = %dna,
+                        agent = %agent,
+                        error = %e,
+                        "Failed to join agent to kitsune2 space"
+                    );
+                } else {
+                    tracing::info!(
+                        dna = %dna,
+                        agent = %agent,
+                        "Successfully joined agent to kitsune2 space"
+                    );
                 }
             }
 
@@ -327,17 +377,44 @@ async fn handle_client_message(
                 });
             }
 
-            let key = (dna_hash.clone(), agent_pubkey.clone());
+            // Parse browser base64 strings to proper Holochain types at the boundary.
+            let dna = match DnaHash::try_from(dna_hash.as_str()) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(
+                        dna = %dna_hash,
+                        error = ?e,
+                        "Failed to parse DNA hash for unregister"
+                    );
+                    return Some(ServerMessage::Error {
+                        message: format!("Invalid DNA hash: {:?}", e),
+                    });
+                }
+            };
+
+            let agent = match AgentPubKey::try_from(agent_pubkey.as_str()) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %agent_pubkey,
+                        error = ?e,
+                        "Failed to parse agent pubkey for unregister"
+                    );
+                    return Some(ServerMessage::Error {
+                        message: format!("Invalid agent pubkey: {:?}", e),
+                    });
+                }
+            };
+
+            let key = (dna.clone(), agent.clone());
             state.registrations.retain(|r| r != &key);
 
             // Unregister from agent proxy manager
-            app_state.agent_proxy.unregister(&dna_hash, &agent_pubkey).await;
+            app_state.agent_proxy.unregister(&dna, &agent).await;
 
             // If kitsune2 is configured, leave the agent from the space
             if let Some(ref gateway_kitsune) = app_state.gateway_kitsune {
-                if let Ok(agent_bytes) = base64::engine::general_purpose::STANDARD.decode(&agent_pubkey) {
-                    gateway_kitsune.agent_leave(&dna_hash, agent_bytes).await;
-                }
+                gateway_kitsune.agent_leave(&dna, &agent).await;
             }
 
             Some(ServerMessage::Unregistered { dna_hash, agent_pubkey })
@@ -345,6 +422,30 @@ async fn handle_client_message(
 
         ClientMessage::Ping => {
             Some(ServerMessage::Pong)
+        }
+
+        ClientMessage::SignResponse {
+            request_id,
+            signature,
+            error,
+        } => {
+            // Deliver the signature response to the pending request
+            let result = match (signature, error) {
+                (Some(sig_b64), _) => {
+                    // Decode the base64 signature
+                    match base64::engine::general_purpose::STANDARD.decode(&sig_b64) {
+                        Ok(sig_bytes) => Ok(bytes::Bytes::from(sig_bytes)),
+                        Err(e) => Err(format!("Invalid signature encoding: {}", e)),
+                    }
+                }
+                (None, Some(err)) => Err(err),
+                (None, None) => Err("No signature or error provided".to_string()),
+            };
+
+            app_state.agent_proxy.deliver_signature(&request_id, result).await;
+
+            // No response needed for sign_response
+            None
         }
     }
 }
@@ -482,8 +583,12 @@ mod tests {
         let mut state = ConnectionState::default();
         state.authenticated = true;
 
+        // Create proper typed keys using from_raw_32 (computes valid DHT location)
+        let dna1 = DnaHash::from_raw_32(vec![1u8; 32]);
+        let agent1 = AgentPubKey::from_raw_32(vec![2u8; 32]);
+
         // Add registration
-        let key = ("dna1".to_string(), "agent1".to_string());
+        let key = (dna1.clone(), agent1.clone());
         state.registrations.push(key.clone());
         assert_eq!(state.registrations.len(), 1);
 
@@ -507,6 +612,17 @@ mod tests {
         use crate::{MockAdminCall, MockAppCall};
         use std::str::FromStr;
         use std::sync::Arc;
+
+        // Helper functions to create proper HoloHash test data
+        // Using from_raw_32 which computes the correct DHT location (last 4 bytes)
+        // so the hash can round-trip through string encoding/parsing.
+        fn test_dna(id: u8) -> DnaHash {
+            DnaHash::from_raw_32(vec![id; 32])
+        }
+
+        fn test_agent(id: u8) -> AgentPubKey {
+            AgentPubKey::from_raw_32(vec![id; 32])
+        }
 
         fn create_test_app_state() -> AppState {
             let admin_call = Arc::new(MockAdminCall::new());
@@ -536,24 +652,41 @@ mod tests {
 
         #[tokio::test]
         async fn test_register_adds_to_agent_proxy() {
+            use std::convert::TryFrom;
+
             let app_state = create_test_app_state();
             let (tx, _rx) = mpsc::channel(32);
             let mut conn_state = ConnectionState::default();
             conn_state.authenticated = true;
 
+            // Use proper HoloHash strings
+            let dna = test_dna(1);
+            let agent = test_agent(2);
+
+            // Debug: verify the strings can be parsed back
+            let dna_str = dna.to_string();
+            let agent_str = agent.to_string();
+            println!("dna_str: {}", dna_str);
+            println!("agent_str: {}", agent_str);
+            let parsed_dna = DnaHash::try_from(dna_str.as_str());
+            let parsed_agent = AgentPubKey::try_from(agent_str.as_str());
+            println!("parsed_dna: {:?}", parsed_dna);
+            println!("parsed_agent: {:?}", parsed_agent);
+
             // Register an agent
             let msg = ClientMessage::Register {
-                dna_hash: "dna1".to_string(),
-                agent_pubkey: "agent1".to_string(),
+                dna_hash: dna_str,
+                agent_pubkey: agent_str,
             };
 
             let response = handle_client_message(msg, &mut conn_state, &app_state, &tx).await;
+            println!("response: {:?}", response);
 
             // Should return Registered
             assert!(matches!(response, Some(ServerMessage::Registered { .. })));
 
             // Should be registered in AgentProxyManager
-            assert!(app_state.agent_proxy.is_registered("dna1", "agent1").await);
+            assert!(app_state.agent_proxy.is_registered(&dna, &agent).await);
             assert_eq!(app_state.agent_proxy.registration_count().await, 1);
         }
 
@@ -564,18 +697,21 @@ mod tests {
             let mut conn_state = ConnectionState::default();
             conn_state.authenticated = true;
 
+            let dna = test_dna(1);
+            let agent = test_agent(2);
+
             // First register an agent
             let register_msg = ClientMessage::Register {
-                dna_hash: "dna1".to_string(),
-                agent_pubkey: "agent1".to_string(),
+                dna_hash: dna.to_string(),
+                agent_pubkey: agent.to_string(),
             };
             handle_client_message(register_msg, &mut conn_state, &app_state, &tx).await;
-            assert!(app_state.agent_proxy.is_registered("dna1", "agent1").await);
+            assert!(app_state.agent_proxy.is_registered(&dna, &agent).await);
 
             // Now unregister
             let unregister_msg = ClientMessage::Unregister {
-                dna_hash: "dna1".to_string(),
-                agent_pubkey: "agent1".to_string(),
+                dna_hash: dna.to_string(),
+                agent_pubkey: agent.to_string(),
             };
             let response = handle_client_message(unregister_msg, &mut conn_state, &app_state, &tx).await;
 
@@ -583,7 +719,7 @@ mod tests {
             assert!(matches!(response, Some(ServerMessage::Unregistered { .. })));
 
             // Should no longer be registered
-            assert!(!app_state.agent_proxy.is_registered("dna1", "agent1").await);
+            assert!(!app_state.agent_proxy.is_registered(&dna, &agent).await);
             assert_eq!(app_state.agent_proxy.registration_count().await, 0);
         }
 
@@ -594,18 +730,43 @@ mod tests {
             let mut conn_state = ConnectionState::default();
             // Not authenticated
 
+            let dna = test_dna(1);
+            let agent = test_agent(2);
+
             let msg = ClientMessage::Register {
-                dna_hash: "dna1".to_string(),
-                agent_pubkey: "agent1".to_string(),
+                dna_hash: dna.to_string(),
+                agent_pubkey: agent.to_string(),
             };
 
             let response = handle_client_message(msg, &mut conn_state, &app_state, &tx).await;
 
-            // Should return error
+            // Should return error (not authenticated)
             assert!(matches!(response, Some(ServerMessage::Error { .. })));
 
             // Should NOT be registered
-            assert!(!app_state.agent_proxy.is_registered("dna1", "agent1").await);
+            assert!(!app_state.agent_proxy.is_registered(&dna, &agent).await);
+        }
+
+        #[tokio::test]
+        async fn test_register_with_invalid_hash_returns_error() {
+            let app_state = create_test_app_state();
+            let (tx, _rx) = mpsc::channel(32);
+            let mut conn_state = ConnectionState::default();
+            conn_state.authenticated = true;
+
+            // Use invalid hash strings
+            let msg = ClientMessage::Register {
+                dna_hash: "invalid_dna".to_string(),
+                agent_pubkey: "invalid_agent".to_string(),
+            };
+
+            let response = handle_client_message(msg, &mut conn_state, &app_state, &tx).await;
+
+            // Should return error (invalid hash)
+            assert!(matches!(response, Some(ServerMessage::Error { message }) if message.contains("Invalid DNA hash")));
+
+            // Should NOT be registered
+            assert_eq!(app_state.agent_proxy.registration_count().await, 0);
         }
 
         #[tokio::test]
@@ -632,23 +793,28 @@ mod tests {
             let mut conn_state = ConnectionState::default();
             conn_state.authenticated = true;
 
+            let dna1 = test_dna(1);
+            let agent1 = test_agent(1);
+            let dna2 = test_dna(2);
+            let agent2 = test_agent(2);
+
             // Register first agent
             let msg1 = ClientMessage::Register {
-                dna_hash: "dna1".to_string(),
-                agent_pubkey: "agent1".to_string(),
+                dna_hash: dna1.to_string(),
+                agent_pubkey: agent1.to_string(),
             };
             handle_client_message(msg1, &mut conn_state, &app_state, &tx).await;
 
             // Register second agent on same connection
             let msg2 = ClientMessage::Register {
-                dna_hash: "dna2".to_string(),
-                agent_pubkey: "agent2".to_string(),
+                dna_hash: dna2.to_string(),
+                agent_pubkey: agent2.to_string(),
             };
             handle_client_message(msg2, &mut conn_state, &app_state, &tx).await;
 
             // Both should be registered
-            assert!(app_state.agent_proxy.is_registered("dna1", "agent1").await);
-            assert!(app_state.agent_proxy.is_registered("dna2", "agent2").await);
+            assert!(app_state.agent_proxy.is_registered(&dna1, &agent1).await);
+            assert!(app_state.agent_proxy.is_registered(&dna2, &agent2).await);
             assert_eq!(app_state.agent_proxy.registration_count().await, 2);
 
             // Local state should track both
@@ -662,16 +828,21 @@ mod tests {
             let mut conn_state = ConnectionState::default();
             conn_state.authenticated = true;
 
+            let dna1 = test_dna(1);
+            let agent1 = test_agent(1);
+            let dna2 = test_dna(2);
+            let agent2 = test_agent(2);
+
             // Register multiple agents
             let msg1 = ClientMessage::Register {
-                dna_hash: "dna1".to_string(),
-                agent_pubkey: "agent1".to_string(),
+                dna_hash: dna1.to_string(),
+                agent_pubkey: agent1.to_string(),
             };
             handle_client_message(msg1, &mut conn_state, &app_state, &tx).await;
 
             let msg2 = ClientMessage::Register {
-                dna_hash: "dna2".to_string(),
-                agent_pubkey: "agent2".to_string(),
+                dna_hash: dna2.to_string(),
+                agent_pubkey: agent2.to_string(),
             };
             handle_client_message(msg2, &mut conn_state, &app_state, &tx).await;
 
@@ -681,8 +852,8 @@ mod tests {
             app_state.agent_proxy.unregister_all(&tx).await;
 
             // All should be unregistered
-            assert!(!app_state.agent_proxy.is_registered("dna1", "agent1").await);
-            assert!(!app_state.agent_proxy.is_registered("dna2", "agent2").await);
+            assert!(!app_state.agent_proxy.is_registered(&dna1, &agent1).await);
+            assert!(!app_state.agent_proxy.is_registered(&dna2, &agent2).await);
             assert_eq!(app_state.agent_proxy.registration_count().await, 0);
         }
     }

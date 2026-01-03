@@ -30,7 +30,7 @@ use crate::routes::websocket::ServerMessage;
 use base64::Engine;
 use bytes::Bytes;
 use holochain_p2p::WireMessage;
-use holochain_types::prelude::{AgentPubKey, ExternIO};
+use holochain_types::prelude::{AgentPubKey, DnaHash, ExternIO};
 use kitsune2_api::{
     AgentId, BoxFut, DynKitsune, DynLocalAgent, DynSpace, DynSpaceHandler, K2Result,
     KitsuneHandler, SpaceHandler, SpaceId, Url,
@@ -39,18 +39,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
-
-/// Convert a SpaceId to a base64-encoded DnaHash string.
-///
-/// SpaceId and DnaHash are the same bytes (32-byte hash + 4-byte type prefix + 3-byte DHT location).
-fn space_id_to_dna_b64(space_id: &SpaceId) -> String {
-    base64::engine::general_purpose::STANDARD.encode(space_id.as_ref())
-}
-
-/// Convert an AgentPubKey to a base64-encoded string.
-fn agent_to_b64(agent: &AgentPubKey) -> String {
-    base64::engine::general_purpose::STANDARD.encode(agent.get_raw_39())
-}
 
 /// Convert signal payload (ExternIO) to a base64-encoded string.
 fn signal_to_b64(signal: &ExternIO) -> String {
@@ -151,16 +139,17 @@ impl ProxySpaceHandler {
                     "Received RemoteSignalEvt for browser agent"
                 );
 
-                // Convert to base64 strings for the WebSocket message
-                let dna_hash = space_id_to_dna_b64(&self.space_id);
-                let agent_pubkey = agent_to_b64(&to_agent);
+                // Convert SpaceId to DnaHash using the built-in conversion
+                let dna_hash = DnaHash::from_k2_space(&self.space_id);
+
+                // to_agent is already an AgentPubKey
                 let signal_data = signal_to_b64(&zome_call_params_serialized);
 
-                // Create the server message
+                // Create the server message with string representations for JSON
                 // Note: from_agent is "remote" since we don't have the sender's
                 // agent key in RemoteSignalEvt (it's embedded in zome_call_params)
                 let server_msg = ServerMessage::Signal {
-                    dna_hash: dna_hash.clone(),
+                    dna_hash: dna_hash.to_string(),
                     from_agent: "remote".to_string(),
                     zome_name: "recv_remote_signal".to_string(),
                     signal: signal_data,
@@ -171,12 +160,12 @@ impl ProxySpaceHandler {
                 let agent_proxy = self.agent_proxy.clone();
                 tokio::spawn(async move {
                     let sent = agent_proxy
-                        .send_signal(&dna_hash, &agent_pubkey, server_msg)
+                        .send_signal(&dna_hash, &to_agent, server_msg)
                         .await;
                     if sent {
                         debug!(
                             dna = %dna_hash,
-                            agent = %agent_pubkey,
+                            agent = %to_agent,
                             "Remote signal forwarded to browser agent"
                         );
                     }
@@ -280,7 +269,7 @@ impl KitsuneProxyBuilder {
 /// # Example
 ///
 /// ```ignore
-/// let gateway_kitsune = GatewayKitsune::new(kitsune);
+/// let gateway_kitsune = GatewayKitsune::new(kitsune, agent_proxy);
 ///
 /// // When browser agent registers via WebSocket
 /// gateway_kitsune.agent_join(&dna_hash_b64, agent_pubkey_bytes).await?;
@@ -291,11 +280,13 @@ impl KitsuneProxyBuilder {
 #[derive(Clone)]
 pub struct GatewayKitsune {
     kitsune: DynKitsune,
-    /// Active spaces by DNA hash (base64).
-    spaces: Arc<RwLock<HashMap<String, DynSpace>>>,
-    /// Registered agents by (dna_b64, agent_b64).
+    /// Agent proxy manager for remote signing.
+    agent_proxy: AgentProxyManager,
+    /// Active spaces by DNA hash.
+    spaces: Arc<RwLock<HashMap<DnaHash, DynSpace>>>,
+    /// Registered agents by (DnaHash, AgentPubKey).
     /// Value is the ProxyAgent for potential future use.
-    agents: Arc<RwLock<HashMap<(String, String), Arc<ProxyAgent>>>>,
+    agents: Arc<RwLock<HashMap<(DnaHash, AgentPubKey), Arc<ProxyAgent>>>>,
 }
 
 impl std::fmt::Debug for GatewayKitsune {
@@ -306,33 +297,30 @@ impl std::fmt::Debug for GatewayKitsune {
 
 impl GatewayKitsune {
     /// Create a new gateway kitsune manager.
-    pub fn new(kitsune: DynKitsune) -> Self {
+    ///
+    /// The `agent_proxy` is used for remote signing when kitsune2 needs
+    /// to sign agent info on behalf of browser agents.
+    pub fn new(kitsune: DynKitsune, agent_proxy: AgentProxyManager) -> Self {
         Self {
             kitsune,
+            agent_proxy,
             spaces: Arc::new(RwLock::new(HashMap::new())),
             agents: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Convert a base64-encoded DNA hash to a SpaceId.
-    fn dna_b64_to_space_id(dna_b64: &str) -> Result<SpaceId, base64::DecodeError> {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(dna_b64)?;
-        Ok(SpaceId::from(Bytes::from(bytes)))
-    }
-
     /// Get or create a space for a DNA.
-    async fn get_or_create_space(&self, dna_b64: &str) -> Result<DynSpace, String> {
+    async fn get_or_create_space(&self, dna_hash: &DnaHash) -> Result<DynSpace, String> {
         // Check if space exists
         {
             let spaces = self.spaces.read().await;
-            if let Some(space) = spaces.get(dna_b64) {
+            if let Some(space) = spaces.get(dna_hash) {
                 return Ok(space.clone());
             }
         }
 
-        // Create new space
-        let space_id = Self::dna_b64_to_space_id(dna_b64)
-            .map_err(|e| format!("Invalid DNA hash base64: {}", e))?;
+        // Create new space using built-in conversion
+        let space_id = dna_hash.to_k2_space();
 
         let space = self
             .kitsune
@@ -343,10 +331,10 @@ impl GatewayKitsune {
         // Store space
         {
             let mut spaces = self.spaces.write().await;
-            spaces.insert(dna_b64.to_string(), space.clone());
+            spaces.insert(dna_hash.clone(), space.clone());
         }
 
-        info!(dna = %dna_b64, "Created kitsune2 space for DNA");
+        info!(dna = %dna_hash, "Created kitsune2 space for DNA");
         Ok(space)
     }
 
@@ -357,24 +345,22 @@ impl GatewayKitsune {
     ///
     /// # Arguments
     ///
-    /// * `dna_b64` - Base64-encoded DNA hash
-    /// * `agent_pubkey` - Raw 32-byte Ed25519 public key
+    /// * `dna_hash` - The DNA hash (proper Holochain type)
+    /// * `agent_pubkey` - The agent public key (proper Holochain type)
     pub async fn agent_join(
         &self,
-        dna_b64: &str,
-        agent_pubkey: impl Into<Bytes>,
+        dna_hash: &DnaHash,
+        agent_pubkey: &AgentPubKey,
     ) -> Result<(), String> {
-        let agent_bytes = agent_pubkey.into();
-        let agent_b64 = base64::engine::general_purpose::STANDARD.encode(&agent_bytes);
+        let key = (dna_hash.clone(), agent_pubkey.clone());
 
         // Check if already registered
-        let key = (dna_b64.to_string(), agent_b64.clone());
         {
             let agents = self.agents.read().await;
             if agents.contains_key(&key) {
                 debug!(
-                    dna = %dna_b64,
-                    agent = %agent_b64,
+                    dna = %dna_hash,
+                    agent = %agent_pubkey,
                     "Agent already joined to space"
                 );
                 return Ok(());
@@ -382,10 +368,10 @@ impl GatewayKitsune {
         }
 
         // Get or create space
-        let space = self.get_or_create_space(dna_b64).await?;
+        let space = self.get_or_create_space(dna_hash).await?;
 
-        // Create proxy agent
-        let proxy_agent = Arc::new(ProxyAgent::new(agent_bytes));
+        // Create proxy agent with access to agent_proxy for remote signing
+        let proxy_agent = Arc::new(ProxyAgent::new(agent_pubkey.clone(), self.agent_proxy.clone()));
 
         // Join space
         space
@@ -400,8 +386,8 @@ impl GatewayKitsune {
         }
 
         info!(
-            dna = %dna_b64,
-            agent = %agent_b64,
+            dna = %dna_hash,
+            agent = %agent_pubkey,
             "Browser agent joined kitsune2 space"
         );
         Ok(())
@@ -414,13 +400,14 @@ impl GatewayKitsune {
     ///
     /// # Arguments
     ///
-    /// * `dna_b64` - Base64-encoded DNA hash
-    /// * `agent_pubkey` - Raw 32-byte Ed25519 public key
-    pub async fn agent_leave(&self, dna_b64: &str, agent_pubkey: impl Into<Bytes>) {
-        let agent_bytes = agent_pubkey.into();
-        let agent_b64 = base64::engine::general_purpose::STANDARD.encode(&agent_bytes);
-
-        let key = (dna_b64.to_string(), agent_b64.clone());
+    /// * `dna_hash` - The DNA hash (proper Holochain type)
+    /// * `agent_pubkey` - The agent public key (proper Holochain type)
+    pub async fn agent_leave(
+        &self,
+        dna_hash: &DnaHash,
+        agent_pubkey: &AgentPubKey,
+    ) {
+        let key = (dna_hash.clone(), agent_pubkey.clone());
 
         // Remove from tracking
         let proxy_agent = {
@@ -430,8 +417,8 @@ impl GatewayKitsune {
 
         if proxy_agent.is_none() {
             debug!(
-                dna = %dna_b64,
-                agent = %agent_b64,
+                dna = %dna_hash,
+                agent = %agent_pubkey,
                 "Agent not found in space (already left?)"
             );
             return;
@@ -440,38 +427,38 @@ impl GatewayKitsune {
         // Get space (if it exists)
         let space = {
             let spaces = self.spaces.read().await;
-            spaces.get(dna_b64).cloned()
+            spaces.get(dna_hash).cloned()
         };
 
         if let Some(space) = space {
-            // Create AgentId from bytes
-            let agent_id = AgentId::from(agent_bytes);
+            // Create AgentId from 32-byte key
+            let agent_id = AgentId::from(Bytes::copy_from_slice(agent_pubkey.get_raw_32()));
 
             // Leave space (publishes tombstone)
             space.local_agent_leave(agent_id).await;
 
             info!(
-                dna = %dna_b64,
-                agent = %agent_b64,
+                dna = %dna_hash,
+                agent = %agent_pubkey,
                 "Browser agent left kitsune2 space"
             );
         }
 
         // Check if space has no more agents, and clean up if so
-        self.maybe_cleanup_space(dna_b64).await;
+        self.maybe_cleanup_space(dna_hash).await;
     }
 
     /// Remove a space if it has no more registered agents.
-    async fn maybe_cleanup_space(&self, dna_b64: &str) {
+    async fn maybe_cleanup_space(&self, dna_hash: &DnaHash) {
         let has_agents = {
             let agents = self.agents.read().await;
-            agents.keys().any(|(dna, _)| dna == dna_b64)
+            agents.keys().any(|(dna, _)| dna == dna_hash)
         };
 
         if !has_agents {
             let mut spaces = self.spaces.write().await;
-            if spaces.remove(dna_b64).is_some() {
-                info!(dna = %dna_b64, "Removed empty kitsune2 space");
+            if spaces.remove(dna_hash).is_some() {
+                info!(dna = %dna_hash, "Removed empty kitsune2 space");
             }
         }
     }
@@ -485,15 +472,8 @@ impl GatewayKitsune {
             agents.keys().cloned().collect()
         };
 
-        for (dna_b64, agent_b64) in agents {
-            let agent_bytes = match base64::engine::general_purpose::STANDARD.decode(&agent_b64) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    error!(agent = %agent_b64, %e, "Failed to decode agent during shutdown");
-                    continue;
-                }
-            };
-            self.agent_leave(&dna_b64, agent_bytes).await;
+        for (dna_hash, agent_pubkey) in agents {
+            self.agent_leave(&dna_hash, &agent_pubkey).await;
         }
 
         info!("Gateway kitsune2 shutdown complete");
@@ -510,8 +490,17 @@ impl GatewayKitsune {
     }
 
     /// Check if an agent is registered in a space.
-    pub async fn is_agent_joined(&self, dna_b64: &str, agent_b64: &str) -> bool {
-        let key = (dna_b64.to_string(), agent_b64.to_string());
+    ///
+    /// # Arguments
+    ///
+    /// * `dna_hash` - The DNA hash (proper Holochain type)
+    /// * `agent_pubkey` - The agent public key (proper Holochain type)
+    pub async fn is_agent_joined(
+        &self,
+        dna_hash: &DnaHash,
+        agent_pubkey: &AgentPubKey,
+    ) -> bool {
+        let key = (dna_hash.clone(), agent_pubkey.clone());
         self.agents.read().await.contains_key(&key)
     }
 }
@@ -521,8 +510,14 @@ mod tests {
     use super::*;
     use holochain_types::prelude::{AgentPubKey, ExternIO, Signature};
 
-    fn test_space_id() -> SpaceId {
-        SpaceId::from(Bytes::from(vec![0u8; 32]))
+    // Helper to create a test DNA hash (uses from_raw_32 for valid checksums)
+    fn test_dna(id: u8) -> DnaHash {
+        DnaHash::from_raw_32(vec![id; 32])
+    }
+
+    // Helper to create a test agent (uses from_raw_32 for valid checksums)
+    fn test_agent(id: u8) -> AgentPubKey {
+        AgentPubKey::from_raw_32(vec![id; 32])
     }
 
     fn test_signature() -> Signature {
@@ -540,8 +535,9 @@ mod tests {
     #[test]
     fn test_space_handler_creation() {
         let agent_proxy = AgentProxyManager::new();
+        let dna = test_dna(1);
         let handler = ProxySpaceHandler {
-            space_id: test_space_id(),
+            space_id: dna.to_k2_space(),
             agent_proxy,
         };
         assert!(format!("{:?}", handler).contains("ProxySpaceHandler"));
@@ -550,7 +546,7 @@ mod tests {
     #[test]
     fn test_decode_remote_signal_evt() {
         // Create a RemoteSignalEvt wire message
-        let to_agent = AgentPubKey::from_raw_36(vec![0xdb; 36]);
+        let to_agent = test_agent(0xdb);
         let zome_call_params = ExternIO::encode(b"test signal payload").unwrap();
         let signature = test_signature();
 
@@ -584,15 +580,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_space_handler_recv_notify() {
-        // Create handler
+        // Create handler with proper typed DNA
         let agent_proxy = AgentProxyManager::new();
+        let dna = test_dna(1);
         let handler = ProxySpaceHandler {
-            space_id: test_space_id(),
+            space_id: dna.to_k2_space(),
             agent_proxy,
         };
 
         // Create a RemoteSignalEvt
-        let to_agent = AgentPubKey::from_raw_36(vec![0xdb; 36]);
+        let to_agent = test_agent(0xdb);
         let zome_call_params = ExternIO::encode(b"hello from conductor").unwrap();
         let signature = test_signature();
 
@@ -602,7 +599,7 @@ mod tests {
 
         // Call recv_notify
         let from_peer = Url::from_str("ws://localhost:5000").unwrap();
-        let space_id = test_space_id();
+        let space_id = dna.to_k2_space();
 
         let result = handler.recv_notify(from_peer, space_id, encoded);
         assert!(result.is_ok());
@@ -612,28 +609,26 @@ mod tests {
     async fn test_signal_forwarding_to_registered_agent() {
         use tokio::sync::mpsc;
 
+        // Create test data - use DnaHash reconstructed from SpaceId for consistency
+        let base_dna = test_dna(1);
+        let space_id = base_dna.to_k2_space();
+        // The handler will reconstruct DnaHash from SpaceId using from_k2_space
+        // so we need to register with that same DnaHash
+        let dna = DnaHash::from_k2_space(&space_id);
+        let to_agent = test_agent(0xdb);
+
         // Create handler with agent proxy
         let agent_proxy = AgentProxyManager::new();
         let (tx, mut rx) = mpsc::channel(32);
 
-        // Calculate what the base64 values will be
-        let space_bytes = vec![0u8; 32];
-        let dna_hash_b64 =
-            base64::engine::general_purpose::STANDARD.encode(&space_bytes);
-        let agent_bytes = vec![0xdb; 36];
-        // AgentPubKey adds 3 bytes (type prefix) to make 39 bytes
-        let to_agent = AgentPubKey::from_raw_36(agent_bytes.clone());
-        let agent_pubkey_b64 =
-            base64::engine::general_purpose::STANDARD.encode(to_agent.get_raw_39());
-
-        // Register the agent
+        // Register the agent using the DnaHash that matches what handler will use
         agent_proxy
-            .register(dna_hash_b64.clone(), agent_pubkey_b64.clone(), tx)
+            .register(dna.clone(), to_agent.clone(), tx)
             .await;
 
         // Create handler
         let handler = ProxySpaceHandler {
-            space_id: SpaceId::from(Bytes::from(space_bytes)),
+            space_id: space_id.clone(),
             agent_proxy: agent_proxy.clone(),
         };
 
@@ -642,15 +637,14 @@ mod tests {
         let signature = test_signature();
 
         let wire_msg =
-            WireMessage::remote_signal_evt(to_agent, zome_call_params.clone(), signature);
+            WireMessage::remote_signal_evt(to_agent.clone(), zome_call_params.clone(), signature);
         let batch: Vec<&WireMessage> = vec![&wire_msg];
         let encoded = WireMessage::encode_batch(&batch).expect("encode");
 
         // Call recv_notify
         let from_peer = Url::from_str("ws://localhost:5000").unwrap();
-        let space_id = SpaceId::from(Bytes::from(vec![0u8; 32]));
 
-        let result = handler.recv_notify(from_peer, space_id, encoded);
+        let result = handler.recv_notify(from_peer, space_id.clone(), encoded);
         assert!(result.is_ok());
 
         // Give the spawned task time to run
@@ -665,7 +659,8 @@ mod tests {
                 zome_name,
                 signal,
             } => {
-                assert_eq!(dna_hash, dna_hash_b64);
+                // dna_hash in the message should be the HoloHash string representation
+                assert_eq!(dna_hash, dna.to_string());
                 assert_eq!(from_agent, "remote");
                 assert_eq!(zome_name, "recv_remote_signal");
                 // Signal should be base64-encoded version of the zome_call_params
@@ -681,15 +676,16 @@ mod tests {
     async fn test_signal_not_forwarded_to_unregistered_agent() {
         // Create handler with agent proxy (no agents registered)
         let agent_proxy = AgentProxyManager::new();
+        let dna = test_dna(1);
 
         // Create handler
         let handler = ProxySpaceHandler {
-            space_id: test_space_id(),
+            space_id: dna.to_k2_space(),
             agent_proxy: agent_proxy.clone(),
         };
 
         // Create a RemoteSignalEvt for an unregistered agent
-        let to_agent = AgentPubKey::from_raw_36(vec![0xdb; 36]);
+        let to_agent = test_agent(0xdb);
         let zome_call_params = ExternIO::encode(b"signal for nobody").unwrap();
         let signature = test_signature();
 
@@ -699,7 +695,7 @@ mod tests {
 
         // Call recv_notify - should succeed (doesn't fail on unregistered agent)
         let from_peer = Url::from_str("ws://localhost:5000").unwrap();
-        let space_id = test_space_id();
+        let space_id = dna.to_k2_space();
 
         let result = handler.recv_notify(from_peer, space_id, encoded);
         assert!(result.is_ok());

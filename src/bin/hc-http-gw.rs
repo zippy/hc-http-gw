@@ -2,7 +2,8 @@ use anyhow::Context;
 use clap::Parser;
 use holochain_http_gateway::{
     resolve_address_from_url, AdminConn, AgentProxyManager, AllowedAppIds, AllowedFns,
-    AppConnPool, Configuration, HcHttpGatewayService,
+    AppConnPool, Configuration, GatewayKitsune, HcHttpGatewayService, KitsuneProxy,
+    KitsuneProxyBuilder,
 };
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -29,6 +30,11 @@ pub struct HcHttpGatewayArgs {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install the default rustls crypto provider (required for TLS connections)
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     initialize_tracing_subscriber()?;
 
     let configuration = load_config_from_env().await?;
@@ -47,6 +53,9 @@ async fn main() -> anyhow::Result<()> {
         agent_proxy.clone(),
     ));
 
+    // Build GatewayKitsune if kitsune2 is enabled
+    let gateway_kitsune = build_gateway_kitsune(&agent_proxy).await?;
+
     // Create service with agent proxy for WebSocket-based signal delivery
     let service = HcHttpGatewayService::with_auth(
         args.address,
@@ -56,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
         app_call,
         None, // No authenticator for now
         Some(agent_proxy),
+        gateway_kitsune,
     )
     .await?;
 
@@ -99,6 +109,49 @@ async fn load_config_from_env() -> anyhow::Result<Configuration> {
     )?;
 
     Ok(config)
+}
+
+/// Build GatewayKitsune if kitsune2 is enabled via environment variables.
+///
+/// Environment variables:
+/// - `HC_GW_KITSUNE2_ENABLED`: Set to "true" or "1" to enable kitsune2
+/// - `HC_GW_BOOTSTRAP_URL`: Bootstrap server URL (required if enabled)
+/// - `HC_GW_SIGNAL_URL`: WebRTC signal server URL (required if enabled)
+async fn build_gateway_kitsune(
+    agent_proxy: &AgentProxyManager,
+) -> anyhow::Result<Option<GatewayKitsune>> {
+    let enabled = env::var("HC_GW_KITSUNE2_ENABLED")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    if !enabled {
+        tracing::info!("Kitsune2 disabled (set HC_GW_KITSUNE2_ENABLED=true to enable)");
+        return Ok(None);
+    }
+
+    let bootstrap_url = env::var("HC_GW_BOOTSTRAP_URL")
+        .context("HC_GW_BOOTSTRAP_URL required when kitsune2 is enabled")?;
+    let signal_url = env::var("HC_GW_SIGNAL_URL")
+        .context("HC_GW_SIGNAL_URL required when kitsune2 is enabled")?;
+
+    tracing::info!(
+        %bootstrap_url,
+        %signal_url,
+        "Initializing kitsune2 for remote signal forwarding"
+    );
+
+    let handler = KitsuneProxy::new(agent_proxy.clone());
+    let kitsune = KitsuneProxyBuilder::new(handler)
+        .with_bootstrap_url(&bootstrap_url)
+        .with_signal_url(&signal_url)
+        .build()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to build kitsune2 instance: {}", e))?;
+
+    let gateway_kitsune = GatewayKitsune::new(kitsune, agent_proxy.clone());
+    tracing::info!("Kitsune2 initialized successfully");
+
+    Ok(Some(gateway_kitsune))
 }
 
 /// Initialize a global tracing subscriber

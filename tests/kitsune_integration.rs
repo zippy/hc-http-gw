@@ -6,39 +6,28 @@
 //! 3. Properly manage agent lifecycle (join/leave spaces)
 
 use base64::Engine;
-use bytes::Bytes;
 use holochain_http_gateway::test::test_tracing::initialize_testing_tracing_subscriber;
 use holochain_http_gateway::{
     AgentProxyManager, GatewayKitsune, KitsuneProxy, KitsuneProxyBuilder,
 };
 use holochain_p2p::WireMessage;
-use holochain_types::prelude::{AgentPubKey, ExternIO, Signature};
+use holochain_types::prelude::{AgentPubKey, DnaHash, ExternIO, Signature};
 use kitsune2_api::SpaceId;
 use tokio::sync::mpsc;
 
-/// Create a test SpaceId (DNA hash) from bytes.
-fn test_space_id() -> SpaceId {
-    SpaceId::from(Bytes::from(vec![0xaa; 32]))
+/// Create a test DnaHash using from_raw_32 (computes valid DHT location)
+fn test_dna() -> DnaHash {
+    DnaHash::from_raw_32(vec![0xaa; 32])
 }
 
-/// Create a test agent pubkey.
+/// Create a test agent pubkey using from_raw_32 (computes valid DHT location)
 fn test_agent_pubkey() -> AgentPubKey {
-    AgentPubKey::from_raw_36(vec![0xbb; 36])
+    AgentPubKey::from_raw_32(vec![0xbb; 32])
 }
 
 /// Create a test signature.
 fn test_signature() -> Signature {
     Signature::from([0xcc; 64])
-}
-
-/// Convert SpaceId to base64 for WebSocket registration.
-fn space_id_to_b64(space_id: &SpaceId) -> String {
-    base64::engine::general_purpose::STANDARD.encode(space_id.as_ref())
-}
-
-/// Convert AgentPubKey to base64 for WebSocket registration.
-fn agent_to_b64(agent: &AgentPubKey) -> String {
-    base64::engine::general_purpose::STANDARD.encode(agent.get_raw_39())
 }
 
 /// Test that GatewayKitsune properly manages agent join/leave lifecycle.
@@ -80,28 +69,27 @@ async fn test_gateway_kitsune_agent_lifecycle() {
 
     // If we somehow connected, test the full lifecycle
     let kitsune = result.unwrap();
-    let gateway_kitsune = GatewayKitsune::new(kitsune);
+    let gateway_kitsune = GatewayKitsune::new(kitsune, agent_proxy.clone());
 
     // Initially no agents or spaces
     assert_eq!(gateway_kitsune.agent_count().await, 0);
     assert_eq!(gateway_kitsune.space_count().await, 0);
 
-    // Join an agent to a space
-    let dna_b64 = space_id_to_b64(&test_space_id());
+    // Join an agent to a space (using proper types)
+    let dna = test_dna();
     let agent = test_agent_pubkey();
-    let agent_bytes = agent.get_raw_39().to_vec();
 
     gateway_kitsune
-        .agent_join(&dna_b64, agent_bytes.clone())
+        .agent_join(&dna, &agent)
         .await
         .expect("agent join failed");
 
     assert_eq!(gateway_kitsune.agent_count().await, 1);
     assert_eq!(gateway_kitsune.space_count().await, 1);
-    assert!(gateway_kitsune.is_agent_joined(&dna_b64, &agent_to_b64(&agent)).await);
+    assert!(gateway_kitsune.is_agent_joined(&dna, &agent).await);
 
     // Leave the agent
-    gateway_kitsune.agent_leave(&dna_b64, agent_bytes).await;
+    gateway_kitsune.agent_leave(&dna, &agent).await;
 
     assert_eq!(gateway_kitsune.agent_count().await, 0);
     // Space should be cleaned up since no agents remain
@@ -118,15 +106,12 @@ async fn test_signal_forwarding_integration() {
     // Create a channel to receive forwarded signals
     let (tx, mut rx) = mpsc::channel(32);
 
-    // Register an agent
-    let space_id = test_space_id();
-    let dna_b64 = space_id_to_b64(&space_id);
+    // Register an agent using proper types
+    let dna = test_dna();
     let agent = test_agent_pubkey();
-    let agent_b64 = agent_to_b64(&agent);
+    let space_id = dna.to_k2_space();
 
-    agent_proxy
-        .register(dna_b64.clone(), agent_b64.clone(), tx)
-        .await;
+    agent_proxy.register(dna.clone(), agent.clone(), tx).await;
 
     // Create the proxy with the agent proxy manager
     let proxy = KitsuneProxy::new(agent_proxy.clone());
@@ -160,7 +145,8 @@ async fn test_signal_forwarding_integration() {
             zome_name,
             signal,
         } => {
-            assert_eq!(dna_hash, dna_b64);
+            // dna_hash should be the HoloHash string representation
+            assert_eq!(dna_hash, dna.to_string());
             assert_eq!(from_agent, "remote");
             assert_eq!(zome_name, "recv_remote_signal");
             // Signal should be base64-encoded version of the zome_call_params
@@ -184,7 +170,8 @@ async fn test_signal_not_forwarded_to_unregistered_agent() {
 
     use kitsune2_api::KitsuneHandler;
 
-    let space_id = test_space_id();
+    let dna = test_dna();
+    let space_id = dna.to_k2_space();
     let space_handler = proxy.create_space(space_id.clone()).await.unwrap();
 
     // Create a wire message for an unregistered agent
@@ -210,21 +197,19 @@ async fn test_multiple_agents_same_dna() {
 
     let agent_proxy = AgentProxyManager::new();
 
-    let space_id = test_space_id();
-    let dna_b64 = space_id_to_b64(&space_id);
+    let dna = test_dna();
+    let space_id = dna.to_k2_space();
 
     // Create channels for two agents
     let (tx1, mut rx1) = mpsc::channel(32);
     let (tx2, mut rx2) = mpsc::channel(32);
 
-    // Register two different agents for the same DNA
-    let agent1 = AgentPubKey::from_raw_36(vec![0x11; 36]);
-    let agent2 = AgentPubKey::from_raw_36(vec![0x22; 36]);
-    let agent1_b64 = agent_to_b64(&agent1);
-    let agent2_b64 = agent_to_b64(&agent2);
+    // Register two different agents for the same DNA (use from_raw_32 for valid checksums)
+    let agent1 = AgentPubKey::from_raw_32(vec![0x11; 32]);
+    let agent2 = AgentPubKey::from_raw_32(vec![0x22; 32]);
 
-    agent_proxy.register(dna_b64.clone(), agent1_b64.clone(), tx1).await;
-    agent_proxy.register(dna_b64.clone(), agent2_b64.clone(), tx2).await;
+    agent_proxy.register(dna.clone(), agent1.clone(), tx1).await;
+    agent_proxy.register(dna.clone(), agent2.clone(), tx2).await;
 
     assert_eq!(agent_proxy.registration_count().await, 2);
 
@@ -288,12 +273,11 @@ async fn test_wire_message_batch_decoding() {
     let agent_proxy = AgentProxyManager::new();
     let (tx, mut rx) = mpsc::channel(32);
 
-    let space_id = test_space_id();
-    let dna_b64 = space_id_to_b64(&space_id);
+    let dna = test_dna();
+    let space_id = dna.to_k2_space();
     let agent = test_agent_pubkey();
-    let agent_b64 = agent_to_b64(&agent);
 
-    agent_proxy.register(dna_b64, agent_b64, tx).await;
+    agent_proxy.register(dna, agent.clone(), tx).await;
 
     let proxy = KitsuneProxy::new(agent_proxy);
 

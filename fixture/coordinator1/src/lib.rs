@@ -134,3 +134,75 @@ pub fn create_known_entry(input: CreateKnownEntryInput) -> ExternResult<CreateKn
         entry_hash: entry_hash.into(),
     })
 }
+
+// ============================================================================
+// Remote Signal Testing Functions
+// ============================================================================
+
+/// Input for ping function
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PingInput {
+    /// Optional message to include in the pong response
+    pub message: Option<String>,
+    /// Target agent to send the pong signal to
+    pub to_agent: AgentPubKey,
+}
+
+/// Signal payload for pong response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PongSignal {
+    pub pong: String,
+    pub from_agent: AgentPubKeyB64,
+    pub timestamp: Timestamp,
+}
+
+/// Ping function that sends a pong signal to a specified agent.
+///
+/// This is useful for testing remote signal delivery from conductor to browser.
+/// Call this with the browser agent's pubkey to have the conductor send a signal to it.
+#[hdk_extern]
+pub fn ping(input: PingInput) -> ExternResult<String> {
+    // Get our own agent key
+    let my_agent = agent_info()?.agent_initial_pubkey;
+
+    // Build pong message
+    let message = input.message.unwrap_or_else(|| "ping".to_string());
+    let pong_signal = PongSignal {
+        pong: format!("pong: {}", message),
+        from_agent: my_agent.into(),
+        timestamp: sys_time()?,
+    };
+
+    // Send remote signal to target
+    let encoded = ExternIO::encode(pong_signal)
+        .map_err(|e| wasm_error!(WasmErrorInner::Guest(format!("Failed to encode signal: {}", e))))?;
+    send_remote_signal(encoded, vec![input.to_agent.clone()])?;
+
+    Ok(format!("Sent pong signal to {}", AgentPubKeyB64::from(input.to_agent)))
+}
+
+/// Send a test signal to a specific agent.
+///
+/// This allows sending arbitrary signals to test the remote signal pipeline.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SendSignalInput {
+    pub to_agent: AgentPubKey,
+    pub message: String,
+}
+
+#[hdk_extern]
+pub fn send_test_signal(input: SendSignalInput) -> ExternResult<String> {
+    let my_agent = agent_info()?.agent_initial_pubkey;
+
+    let signal = PongSignal {
+        pong: input.message,
+        from_agent: my_agent.into(),
+        timestamp: sys_time()?,
+    };
+
+    let encoded = ExternIO::encode(signal)
+        .map_err(|e| wasm_error!(WasmErrorInner::Guest(format!("Failed to encode signal: {}", e))))?;
+    send_remote_signal(encoded, vec![input.to_agent.clone()])?;
+
+    Ok(format!("Sent signal to {}", AgentPubKeyB64::from(input.to_agent)))
+}

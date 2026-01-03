@@ -325,20 +325,19 @@ impl AppConnPool {
                         signal: app_signal,
                     } = signal
                     {
-                        // Extract DNA hash and agent pubkey from cell_id
-                        let dna_hash = base64::engine::general_purpose::STANDARD
-                            .encode(cell_id.dna_hash().get_raw_39());
-                        let agent_pubkey = base64::engine::general_purpose::STANDARD
-                            .encode(cell_id.agent_pubkey().get_raw_39());
+                        // Extract DNA hash and agent pubkey from cell_id (proper types)
+                        let dna_hash = cell_id.dna_hash().clone();
+                        let agent_pubkey = cell_id.agent_pubkey().clone();
 
                         // Encode the signal payload as base64
                         let signal_bytes = app_signal.into_inner().into_vec();
                         let signal_base64 =
                             base64::engine::general_purpose::STANDARD.encode(&signal_bytes);
 
+                        // Create server message with string representations for JSON
                         let server_msg = ServerMessage::Signal {
-                            dna_hash: dna_hash.clone(),
-                            from_agent: agent_pubkey.clone(),
+                            dna_hash: dna_hash.to_string(),
+                            from_agent: agent_pubkey.to_string(),
                             zome_name: zome_name.to_string(),
                             signal: signal_base64,
                         };
@@ -454,14 +453,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_signal_forwarding_uses_shared_agent_proxy() {
+        use holochain_types::prelude::{AgentPubKey, DnaHash};
+
         let config = test_config();
         let admin_call = Arc::new(MockAdminCall::new());
         let agent_proxy = AgentProxyManager::new();
 
+        // Create proper typed test data
+        let test_dna = DnaHash::from_raw_36(vec![1u8; 36]);
+        let test_agent = AgentPubKey::from_raw_36(vec![2u8; 36]);
+
         // Register an agent before creating the pool
         let (tx, mut rx) = tokio::sync::mpsc::channel(32);
         agent_proxy
-            .register("test_dna".to_string(), "test_agent".to_string(), tx)
+            .register(test_dna.clone(), test_agent.clone(), tx)
             .await;
 
         let pool = AppConnPool::with_signal_forwarding(config, admin_call, agent_proxy.clone());
@@ -469,7 +474,7 @@ mod tests {
         // The pool's agent proxy should be the same instance
         // Verify by sending a signal through the original and checking it arrives
         let signal = crate::routes::websocket::ServerMessage::Signal {
-            dna_hash: "test_dna".to_string(),
+            dna_hash: test_dna.to_string(),
             from_agent: "sender".to_string(),
             zome_name: "test_zome".to_string(),
             signal: "test_signal".to_string(),
@@ -479,7 +484,7 @@ mod tests {
         let sent = pool
             .get_agent_proxy()
             .unwrap()
-            .send_signal("test_dna", "test_agent", signal)
+            .send_signal(&test_dna, &test_agent, signal)
             .await;
         assert!(sent);
 
@@ -487,7 +492,7 @@ mod tests {
         let received = rx.recv().await.unwrap();
         match received {
             crate::routes::websocket::ServerMessage::Signal { dna_hash, .. } => {
-                assert_eq!(dna_hash, "test_dna");
+                assert_eq!(dna_hash, test_dna.to_string());
             }
             _ => panic!("Expected Signal message"),
         }

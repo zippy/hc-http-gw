@@ -4,7 +4,9 @@
 //! without requiring a full kitsune2 network setup.
 
 use axum::{extract::State, Json};
+use holochain_types::prelude::{AgentPubKey, DnaHash};
 use serde::{Deserialize, Serialize};
+use std::convert::TryFrom;
 
 use crate::routes::websocket::ServerMessage;
 use crate::service::AppState;
@@ -12,9 +14,9 @@ use crate::service::AppState;
 /// Request body for sending a test signal.
 #[derive(Debug, Deserialize)]
 pub struct TestSignalRequest {
-    /// Base64-encoded DNA hash.
+    /// DNA hash (HoloHash string format).
     pub dna_hash: String,
-    /// Base64-encoded agent public key to send signal to.
+    /// Agent public key (HoloHash string format).
     pub agent_pubkey: String,
     /// Zome name (for display purposes).
     pub zome_name: String,
@@ -39,8 +41,8 @@ pub struct TestSignalResponse {
 /// POST /test/signal
 /// ```json
 /// {
-///   "dna_hash": "base64...",
-///   "agent_pubkey": "base64...",
+///   "dna_hash": "uhC0k...",
+///   "agent_pubkey": "uhCAk...",
 ///   "zome_name": "test",
 ///   "signal": "base64..."
 /// }
@@ -50,10 +52,41 @@ pub async fn test_signal(
     State(state): State<AppState>,
     Json(request): Json<TestSignalRequest>,
 ) -> Json<TestSignalResponse> {
+    // Parse the DNA hash and agent pubkey to proper types
+    let dna = match DnaHash::try_from(request.dna_hash.as_str()) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(
+                dna = %request.dna_hash,
+                error = ?e,
+                "Failed to parse DNA hash in test signal"
+            );
+            return Json(TestSignalResponse {
+                success: false,
+                message: format!("Invalid DNA hash: {:?}", e),
+            });
+        }
+    };
+
+    let agent = match AgentPubKey::try_from(request.agent_pubkey.as_str()) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(
+                agent = %request.agent_pubkey,
+                error = ?e,
+                "Failed to parse agent pubkey in test signal"
+            );
+            return Json(TestSignalResponse {
+                success: false,
+                message: format!("Invalid agent pubkey: {:?}", e),
+            });
+        }
+    };
+
     tracing::info!(
         "Test signal request: dna={}, agent={}, zome={}",
-        &request.dna_hash[..20.min(request.dna_hash.len())],
-        &request.agent_pubkey[..20.min(request.agent_pubkey.len())],
+        dna,
+        agent,
         request.zome_name
     );
 
@@ -65,11 +98,8 @@ pub async fn test_signal(
         signal: request.signal,
     };
 
-    // Send the signal via the agent proxy manager
-    let sent = state
-        .agent_proxy
-        .send_signal(&request.dna_hash, &request.agent_pubkey, signal_msg)
-        .await;
+    // Send the signal via the agent proxy manager using proper types
+    let sent = state.agent_proxy.send_signal(&dna, &agent, signal_msg).await;
 
     if sent {
         Json(TestSignalResponse {
@@ -79,7 +109,7 @@ pub async fn test_signal(
     } else {
         Json(TestSignalResponse {
             success: false,
-            message: "No client registered for this dna/agent".to_string(),
+            message: format!("No client registered for dna={}, agent={}", dna, agent),
         })
     }
 }

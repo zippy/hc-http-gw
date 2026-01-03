@@ -20,6 +20,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 ed25519-dalek = "2"
 futures = "0.3"
+hex = "0.4"
 holochain_client = "0.8.0"
 holochain_conductor_api = "0.6.0"
 holochain_types = "0.6.0"
@@ -36,12 +37,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { package = "hc_serde_json", version = "1" }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [
   "env-filter",
   "registry",
 ] }
 url = "2"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 
 [dev-dependencies]
 holochain_http_gateway = { path = ".", features = ["test-utils"] }

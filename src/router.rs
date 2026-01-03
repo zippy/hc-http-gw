@@ -11,8 +11,10 @@ use crate::{
     service::AppState,
     AdminCall,
 };
-use axum::{http::StatusCode, routing::{get, post}, Router};
+use axum::routing::{get, post};
+use axum::Router;
 use std::sync::Arc;
+use tower_http::cors::CorsLayer;
 
 /// Create the HTTP gateway router.
 pub fn hc_http_gateway_router(
@@ -85,8 +87,12 @@ pub fn hc_http_gateway_router_full(
         router = router.route("/ws", get(ws_handler));
     }
 
+    // Add CORS layer to allow cross-origin requests (needed for browser extension testing)
+    // Use permissive() which handles preflight OPTIONS requests automatically
+    let cors = CorsLayer::permissive();
+
     router
-        .method_not_allowed_fallback(|| async { (StatusCode::METHOD_NOT_ALLOWED, ()) })
+        .layer(cors)
         .with_state(state)
 }
 

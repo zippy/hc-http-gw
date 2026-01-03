@@ -7,7 +7,7 @@ use crate::holochain::{AdminCall, AppCall};
 use crate::kitsune_proxy::GatewayKitsune;
 use crate::{
     config::Configuration,
-    router::{hc_http_gateway_router, hc_http_gateway_router_with_auth},
+    router::{hc_http_gateway_router, hc_http_gateway_router_full},
 };
 use axum::Router;
 use std::net::{IpAddr, SocketAddr};
@@ -71,10 +71,11 @@ impl HcHttpGatewayService {
         Ok(HcHttpGatewayService { router, listener })
     }
 
-    /// Create a new service instance with optional authentication and agent proxy.
+    /// Create a new service instance with optional authentication, agent proxy, and kitsune2.
     ///
-    /// This constructor allows configuring signal forwarding by passing an `AgentProxyManager`
-    /// that is shared with the `AppConnPool`.
+    /// This constructor allows configuring:
+    /// - Signal forwarding via `AgentProxyManager` shared with the `AppConnPool`
+    /// - Remote signal delivery via `GatewayKitsune` for kitsune2 network participation
     pub async fn with_auth(
         address: impl Into<IpAddr>,
         port: u16,
@@ -83,15 +84,17 @@ impl HcHttpGatewayService {
         app_call: Arc<dyn AppCall>,
         authenticator: Option<Arc<dyn AgentAuthenticator>>,
         agent_proxy: Option<AgentProxyManager>,
+        gateway_kitsune: Option<GatewayKitsune>,
     ) -> std::io::Result<Self> {
         tracing::info!("Configuration: {:?}", configuration);
 
-        let router = hc_http_gateway_router_with_auth(
+        let router = hc_http_gateway_router_full(
             configuration,
             admin_call,
             app_call,
             authenticator,
             agent_proxy,
+            gateway_kitsune,
         );
 
         let address = SocketAddr::new(address.into(), port);
