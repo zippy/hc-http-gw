@@ -27,18 +27,19 @@
 use crate::agent_proxy::AgentProxyManager;
 use crate::proxy_agent::ProxyAgent;
 use crate::routes::websocket::ServerMessage;
+use crate::wire_preflight::WirePreflightMessage;
 use base64::Engine;
 use bytes::Bytes;
 use holochain_p2p::WireMessage;
 use holochain_types::prelude::{AgentPubKey, DnaHash, ExternIO};
 use kitsune2_api::{
-    AgentId, BoxFut, DynKitsune, DynLocalAgent, DynSpace, DynSpaceHandler, K2Result,
+    AgentId, BoxFut, DynKitsune, DynLocalAgent, DynSpace, DynSpaceHandler, K2Error, K2Result,
     KitsuneHandler, SpaceHandler, SpaceId, Url,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Convert signal payload (ExternIO) to a base64-encoded string.
 fn signal_to_b64(signal: &ExternIO) -> String {
@@ -81,6 +82,52 @@ impl KitsuneHandler for KitsuneProxy {
 
     fn peer_disconnect(&self, peer: Url, reason: Option<String>) {
         debug!(%peer, ?reason, "Peer disconnected from gateway");
+    }
+
+    fn preflight_gather_outgoing(&self, peer_url: Url) -> BoxFut<'_, K2Result<Bytes>> {
+        Box::pin(async move {
+            // Create preflight message with matching protocol version
+            let preflight = WirePreflightMessage::new();
+
+            info!(
+                %peer_url,
+                proto_ver = preflight.compat.proto_ver,
+                "Sending preflight to peer"
+            );
+
+            preflight
+                .encode()
+                .map_err(|e| K2Error::other(format!("Failed to encode preflight: {}", e)))
+        })
+    }
+
+    fn preflight_validate_incoming(
+        &self,
+        peer_url: Url,
+        data: Bytes,
+    ) -> BoxFut<'_, K2Result<()>> {
+        Box::pin(async move {
+            // Decode and validate the incoming preflight
+            let preflight = WirePreflightMessage::decode(&data)
+                .map_err(|e| K2Error::other(format!("Invalid preflight from peer: {}", e)))?;
+
+            // Check protocol version compatibility
+            if preflight.compat.proto_ver != 2 {
+                return Err(K2Error::other(format!(
+                    "Incompatible protocol version from {}: expected 2, got {}",
+                    peer_url, preflight.compat.proto_ver
+                )));
+            }
+
+            info!(
+                %peer_url,
+                proto_ver = preflight.compat.proto_ver,
+                agent_count = preflight.agents.len(),
+                "Validated incoming preflight"
+            );
+
+            Ok(())
+        })
     }
 }
 
@@ -239,12 +286,26 @@ impl KitsuneProxyBuilder {
             })?;
         }
 
-        // Configure signal server
+        // Configure signal server with STUN servers for WebRTC
         if let Some(signal_url) = self.signal_url {
+            use kitsune2_transport_tx5::{IceServers, WebRtcConfig};
+
             builder.config.set_module_config(&Tx5TransportModConfig {
                 tx5_transport: Tx5TransportConfig {
                     server_url: signal_url,
                     signal_allow_plain_text: true, // TODO: configure for production
+                    webrtc_config: WebRtcConfig {
+                        ice_servers: vec![
+                            IceServers {
+                                urls: vec![
+                                    "stun:stun.l.google.com:19302".to_string(),
+                                    "stun:stun1.l.google.com:19302".to_string(),
+                                ],
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
             })?;

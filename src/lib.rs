@@ -6,6 +6,8 @@
 pub mod agent_proxy;
 /// Kitsune2 proxy for browser extension agents.
 pub mod kitsune_proxy;
+/// Wire format for kitsune2 preflight messages.
+pub mod wire_preflight;
 /// Proxy agent implementation for browser agents.
 pub mod proxy_agent;
 mod app_selection;
@@ -31,4 +33,5 @@ pub use holochain::*;
 pub use resolve::resolve_address_from_url;
 pub use kitsune_proxy::{GatewayKitsune, KitsuneProxy, KitsuneProxyBuilder};
 pub use proxy_agent::ProxyAgent;
+pub use wire_preflight::{NetworkCompatParams, WirePreflightMessage};
 pub use service::HcHttpGatewayService;
