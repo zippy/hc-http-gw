@@ -276,11 +276,11 @@ impl AgentProxyManager {
             pending.insert(request_id.clone(), tx);
         }
 
-        // Send sign request to browser - use HoloHash's built-in string encoding
+        // Send sign request to browser - use URL_SAFE_NO_PAD to match Holochain encoding
         let sign_request = ServerMessage::SignRequest {
             request_id: request_id.clone(),
             agent_pubkey: agent_pubkey.to_string(),
-            message: base64::engine::general_purpose::STANDARD.encode(message),
+            message: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(message),
         };
 
         if let Err(e) = sender.send(sign_request).await {

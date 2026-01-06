@@ -6,6 +6,8 @@
 pub mod agent_proxy;
 /// Kitsune2 proxy for browser extension agents.
 pub mod kitsune_proxy;
+/// Temporary OpStore for browser extension publishing.
+pub mod temp_op_store;
 /// Wire format for kitsune2 preflight messages.
 pub mod wire_preflight;
 /// Proxy agent implementation for browser agents.
@@ -33,5 +35,6 @@ pub use holochain::*;
 pub use resolve::resolve_address_from_url;
 pub use kitsune_proxy::{GatewayKitsune, KitsuneProxy, KitsuneProxyBuilder};
 pub use proxy_agent::ProxyAgent;
+pub use temp_op_store::{TempOpStoreFactory, TempOpStoreHandle};
 pub use wire_preflight::{NetworkCompatParams, WirePreflightMessage};
 pub use service::HcHttpGatewayService;

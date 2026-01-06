@@ -5,6 +5,7 @@ use crate::app_selection::AppInfoCache;
 use crate::auth::AgentAuthenticator;
 use crate::holochain::{AdminCall, AppCall};
 use crate::kitsune_proxy::GatewayKitsune;
+use crate::temp_op_store::TempOpStoreHandle;
 use crate::{
     config::Configuration,
     router::{hc_http_gateway_router, hc_http_gateway_router_full},
@@ -38,6 +39,8 @@ pub struct AppState {
     pub agent_proxy: AgentProxyManager,
     /// Optional kitsune2 network manager for remote signal forwarding.
     pub gateway_kitsune: Option<GatewayKitsune>,
+    /// Optional TempOpStore handle for browser extension publishing.
+    pub temp_op_store: Option<TempOpStoreHandle>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -48,6 +51,7 @@ impl std::fmt::Debug for AppState {
             .field("has_authenticator", &self.authenticator.is_some())
             .field("agent_proxy", &self.agent_proxy)
             .field("has_gateway_kitsune", &self.gateway_kitsune.is_some())
+            .field("has_temp_op_store", &self.temp_op_store.is_some())
             .finish()
     }
 }
@@ -71,11 +75,12 @@ impl HcHttpGatewayService {
         Ok(HcHttpGatewayService { router, listener })
     }
 
-    /// Create a new service instance with optional authentication, agent proxy, and kitsune2.
+    /// Create a new service instance with optional authentication, agent proxy, kitsune2, and op store.
     ///
     /// This constructor allows configuring:
     /// - Signal forwarding via `AgentProxyManager` shared with the `AppConnPool`
     /// - Remote signal delivery via `GatewayKitsune` for kitsune2 network participation
+    /// - DHT publishing via `TempOpStoreHandle` for browser extension agents
     pub async fn with_auth(
         address: impl Into<IpAddr>,
         port: u16,
@@ -85,6 +90,7 @@ impl HcHttpGatewayService {
         authenticator: Option<Arc<dyn AgentAuthenticator>>,
         agent_proxy: Option<AgentProxyManager>,
         gateway_kitsune: Option<GatewayKitsune>,
+        temp_op_store: Option<TempOpStoreHandle>,
     ) -> std::io::Result<Self> {
         tracing::info!("Configuration: {:?}", configuration);
 
@@ -95,6 +101,7 @@ impl HcHttpGatewayService {
             authenticator,
             agent_proxy,
             gateway_kitsune,
+            temp_op_store,
         );
 
         let address = SocketAddr::new(address.into(), port);

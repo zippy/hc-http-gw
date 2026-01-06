@@ -2,11 +2,12 @@ use crate::agent_proxy::AgentProxyManager;
 use crate::auth::AgentAuthenticator;
 use crate::holochain::AppCall;
 use crate::kitsune_proxy::GatewayKitsune;
+use crate::temp_op_store::TempOpStoreHandle;
 use crate::{
     config::Configuration,
     routes::{
         auth_challenge, auth_verify, dht_count_links, dht_get_details, dht_get_links,
-        dht_get_record, health_check, test_signal, ws_handler, zome_call,
+        dht_get_record, dht_publish, health_check, test_signal, ws_handler, zome_call,
     },
     service::AppState,
     AdminCall,
@@ -40,6 +41,7 @@ pub fn hc_http_gateway_router_with_auth(
         authenticator,
         agent_proxy,
         None,
+        None,
     )
 }
 
@@ -51,6 +53,7 @@ pub fn hc_http_gateway_router_full(
     authenticator: Option<Arc<dyn AgentAuthenticator>>,
     agent_proxy: Option<AgentProxyManager>,
     gateway_kitsune: Option<GatewayKitsune>,
+    temp_op_store: Option<TempOpStoreHandle>,
 ) -> Router {
     let state = AppState {
         configuration,
@@ -60,6 +63,7 @@ pub fn hc_http_gateway_router_full(
         authenticator,
         agent_proxy: agent_proxy.unwrap_or_else(AgentProxyManager::new),
         gateway_kitsune,
+        temp_op_store,
     };
 
     let ws_enabled = state.configuration.websocket.enabled;
@@ -74,6 +78,8 @@ pub fn hc_http_gateway_router_full(
         .route("/dht/{dna_hash}/details/{hash}", get(dht_get_details))
         .route("/dht/{dna_hash}/links", get(dht_get_links))
         .route("/dht/{dna_hash}/links/count", get(dht_count_links))
+        // DHT publish endpoint for zero-arc browser extension agents
+        .route("/dht/{dna_hash}/publish", post(dht_publish))
         // Test endpoint for signal testing (development only)
         .route("/test/signal", post(test_signal))
         // Zome call endpoint

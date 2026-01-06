@@ -38,6 +38,9 @@ pub enum HcHttpGatewayError {
     /// Handle errors specific to app selection
     #[error("Error selecting a valid app: {0}")]
     AppSelectionError(#[from] AppSelectionError),
+    /// Internal server error for unexpected failures
+    #[error("Internal server error: {0}")]
+    InternalServerError(String),
 }
 
 /// Gateway result type.
@@ -83,6 +86,9 @@ impl HcHttpGatewayError {
             HcHttpGatewayError::HolochainError(ConductorApiError::ExternalApiWireError(
                 ExternalApiWireError::RibosomeError(e),
             )) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+            HcHttpGatewayError::InternalServerError(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Something went wrong".to_string(),

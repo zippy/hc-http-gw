@@ -647,6 +647,7 @@ mod tests {
                 authenticator: None,
                 agent_proxy: AgentProxyManager::new(),
                 gateway_kitsune: None,
+                temp_op_store: None,
             }
         }
 

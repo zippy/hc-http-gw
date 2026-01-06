@@ -3,7 +3,7 @@ use clap::Parser;
 use holochain_http_gateway::{
     resolve_address_from_url, AdminConn, AgentProxyManager, AllowedAppIds, AllowedFns,
     AppConnPool, Configuration, GatewayKitsune, HcHttpGatewayService, KitsuneProxy,
-    KitsuneProxyBuilder,
+    KitsuneProxyBuilder, TempOpStoreFactory, TempOpStoreHandle,
 };
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -53,8 +53,8 @@ async fn main() -> anyhow::Result<()> {
         agent_proxy.clone(),
     ));
 
-    // Build GatewayKitsune if kitsune2 is enabled
-    let gateway_kitsune = build_gateway_kitsune(&agent_proxy).await?;
+    // Build GatewayKitsune and TempOpStore if kitsune2 is enabled
+    let (gateway_kitsune, temp_op_store) = build_gateway_kitsune(&agent_proxy).await?;
 
     // Create service with agent proxy for WebSocket-based signal delivery
     let service = HcHttpGatewayService::with_auth(
@@ -66,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
         None, // No authenticator for now
         Some(agent_proxy),
         gateway_kitsune,
+        temp_op_store,
     )
     .await?;
 
@@ -111,7 +112,7 @@ async fn load_config_from_env() -> anyhow::Result<Configuration> {
     Ok(config)
 }
 
-/// Build GatewayKitsune if kitsune2 is enabled via environment variables.
+/// Build GatewayKitsune and TempOpStore if kitsune2 is enabled via environment variables.
 ///
 /// Environment variables:
 /// - `HC_GW_KITSUNE2_ENABLED`: Set to "true" or "1" to enable kitsune2
@@ -119,14 +120,14 @@ async fn load_config_from_env() -> anyhow::Result<Configuration> {
 /// - `HC_GW_SIGNAL_URL`: WebRTC signal server URL (required if enabled)
 async fn build_gateway_kitsune(
     agent_proxy: &AgentProxyManager,
-) -> anyhow::Result<Option<GatewayKitsune>> {
+) -> anyhow::Result<(Option<GatewayKitsune>, Option<TempOpStoreHandle>)> {
     let enabled = env::var("HC_GW_KITSUNE2_ENABLED")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
     if !enabled {
         tracing::info!("Kitsune2 disabled (set HC_GW_KITSUNE2_ENABLED=true to enable)");
-        return Ok(None);
+        return Ok((None, None));
     }
 
     let bootstrap_url = env::var("HC_GW_BOOTSTRAP_URL")
@@ -137,13 +138,19 @@ async fn build_gateway_kitsune(
     tracing::info!(
         %bootstrap_url,
         %signal_url,
-        "Initializing kitsune2 for remote signal forwarding"
+        "Initializing kitsune2 for remote signal forwarding with TempOpStore"
     );
+
+    // Create TempOpStore for browser extension publishing
+    let (op_store_factory, temp_op_store_handle) = TempOpStoreFactory::create();
+    op_store_factory.start_cleanup_task();
+    tracing::info!("TempOpStore initialized with 60-second TTL");
 
     let handler = KitsuneProxy::new(agent_proxy.clone());
     let kitsune = KitsuneProxyBuilder::new(handler)
         .with_bootstrap_url(&bootstrap_url)
         .with_signal_url(&signal_url)
+        .with_op_store(op_store_factory.into_dyn())
         .build()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to build kitsune2 instance: {}", e))?;
@@ -151,7 +158,7 @@ async fn build_gateway_kitsune(
     let gateway_kitsune = GatewayKitsune::new(kitsune, agent_proxy.clone());
     tracing::info!("Kitsune2 initialized successfully");
 
-    Ok(Some(gateway_kitsune))
+    Ok((Some(gateway_kitsune), Some(temp_op_store_handle)))
 }
 
 /// Initialize a global tracing subscriber
