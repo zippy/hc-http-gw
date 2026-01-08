@@ -57,6 +57,24 @@ pub enum ClientMessage {
         /// Error message if signing failed.
         error: Option<String>,
     },
+    /// Send remote signals to target agents via kitsune2.
+    SendRemoteSignal {
+        /// DNA hash (base64 encoded).
+        dna_hash: String,
+        /// Signed signals to send.
+        signals: Vec<SignedRemoteSignalInput>,
+    },
+}
+
+/// Signed remote signal input from browser.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SignedRemoteSignalInput {
+    /// Target agent public key (as byte array).
+    pub target_agent: Vec<u8>,
+    /// Serialized ZomeCallParams (as byte array).
+    pub zome_call_params: Vec<u8>,
+    /// Ed25519 signature (64 bytes, as byte array).
+    pub signature: Vec<u8>,
 }
 
 /// Messages sent from gateway to browser.
@@ -446,6 +464,48 @@ async fn handle_client_message(
 
             // No response needed for sign_response
             None
+        }
+
+        ClientMessage::SendRemoteSignal { dna_hash, signals } => {
+            // Check if authenticated
+            if !state.authenticated {
+                tracing::warn!("send_remote_signal received before authentication");
+                return Some(ServerMessage::Error {
+                    message: "Must authenticate before sending signals".to_string(),
+                });
+            }
+
+            // Check if kitsune2 is enabled
+            if let Some(ref gateway_kitsune) = app_state.gateway_kitsune {
+                // Parse DNA hash from base64 string (HoloHash uses URL-safe base64 with 'u' prefix)
+                let dna = match DnaHash::try_from(dna_hash.as_str()) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(?e, dna = %dna_hash, "Invalid DNA hash in send_remote_signal");
+                        return Some(ServerMessage::Error {
+                            message: format!("Invalid DNA hash: {:?}", e),
+                        });
+                    }
+                };
+
+                // Forward to kitsune2
+                let signal_count = signals.len();
+                let (success, failed) = gateway_kitsune.send_remote_signals(&dna, signals).await;
+                tracing::info!(
+                    total = signal_count,
+                    success,
+                    failed,
+                    "send_remote_signal complete"
+                );
+
+                // No response needed (fire-and-forget)
+                None
+            } else {
+                tracing::warn!("send_remote_signal received but kitsune2 not enabled");
+                Some(ServerMessage::Error {
+                    message: "Remote signals not available (kitsune2 not enabled)".to_string(),
+                })
+            }
         }
     }
 }

@@ -30,8 +30,9 @@ use crate::routes::websocket::ServerMessage;
 use crate::wire_preflight::WirePreflightMessage;
 use base64::Engine;
 use bytes::Bytes;
+use crate::routes::websocket::SignedRemoteSignalInput;
 use holochain_p2p::WireMessage;
-use holochain_types::prelude::{AgentPubKey, DnaHash, ExternIO};
+use holochain_types::prelude::{AgentPubKey, DnaHash, ExternIO, Signature};
 use kitsune2_api::{
     AgentId, BoxFut, DynKitsune, DynLocalAgent, DynSpace, DynSpaceHandler, K2Error, K2Result,
     KitsuneHandler, SpaceHandler, SpaceId, Url,
@@ -567,6 +568,81 @@ impl GatewayKitsune {
     /// Get the number of active spaces.
     pub async fn space_count(&self) -> usize {
         self.spaces.read().await.len()
+    }
+
+    /// Send remote signals to target agents via kitsune2 network.
+    ///
+    /// For each signal:
+    /// 1. Look up target agent's URL from peer_store
+    /// 2. Create WireMessage::remote_signal_evt
+    /// 3. Send via space.send_notify()
+    ///
+    /// Returns (success_count, fail_count).
+    pub async fn send_remote_signals(
+        &self,
+        dna_hash: &DnaHash,
+        signals: Vec<SignedRemoteSignalInput>,
+    ) -> (usize, usize) {
+        let mut success_count = 0;
+        let mut fail_count = 0;
+
+        // Get or create space for DNA
+        let space = match self.get_or_create_space(dna_hash).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(%e, "Failed to get space for remote signal");
+                return (0, signals.len());
+            }
+        };
+
+        for signal in signals {
+            // Parse target agent from 39-byte HoloHash
+            let target_agent = match AgentPubKey::try_from_raw_39(signal.target_agent.clone()) {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(?e, "Invalid target agent in send_remote_signal");
+                    fail_count += 1;
+                    continue;
+                }
+            };
+
+            // Look up peer URL from peer store
+            let agent_id = AgentId::from(Bytes::copy_from_slice(target_agent.get_raw_32()));
+            let to_url = match space.peer_store().get(agent_id).await {
+                Ok(Some(info)) if info.url.is_some() => info.url.clone().unwrap(),
+                _ => {
+                    debug!(%target_agent, "Target agent not found in peer store");
+                    fail_count += 1;
+                    continue;
+                }
+            };
+
+            // Create wire message
+            let extern_io = ExternIO(signal.zome_call_params);
+            let signature = Signature::try_from(signal.signature.as_slice())
+                .unwrap_or_else(|_| Signature::from([0u8; 64]));
+            let wire_msg = WireMessage::remote_signal_evt(target_agent.clone(), extern_io, signature);
+
+            // Encode and send
+            let encoded = match WireMessage::encode_batch(&[&wire_msg]) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(?e, "Failed to encode wire message");
+                    fail_count += 1;
+                    continue;
+                }
+            };
+
+            if let Err(e) = space.send_notify(to_url.clone(), encoded).await {
+                warn!(?e, %to_url, "Failed to send remote signal");
+                fail_count += 1;
+            } else {
+                debug!(%target_agent, %to_url, "Sent remote signal");
+                success_count += 1;
+            }
+        }
+
+        (success_count, fail_count)
     }
 
     /// Publish ops to DHT authorities near the given basis location.
