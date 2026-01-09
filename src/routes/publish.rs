@@ -55,12 +55,14 @@ pub struct OpPublishResult {
 /// Response body for publish endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PublishResponse {
-    /// Overall success status.
+    /// Overall success status (true if all ops were stored AND published to at least one peer).
     pub success: bool,
-    /// Number of ops successfully queued.
+    /// Number of ops successfully stored in TempOpStore.
     pub queued: usize,
-    /// Number of ops that failed.
+    /// Number of ops that failed to store.
     pub failed: usize,
+    /// Number of ops actually published to DHT peers (0 means retry needed).
+    pub published: usize,
     /// Per-op results (same order as request).
     pub results: Vec<OpPublishResult>,
 }
@@ -149,25 +151,40 @@ pub async fn dht_publish(
 
     // Phase 2: Trigger kitsune2 publish for all stored ops
     // Group ops by basis location and publish to DHT authorities
+    let mut published = 0usize;
+
     if !processed_ops.is_empty() {
         if let Some(gateway_kitsune) = &state.gateway_kitsune {
             // Group ops by basis location for efficient publishing
             use std::collections::HashMap;
             let mut ops_by_loc: HashMap<u32, Vec<OpId>> = HashMap::new();
-            for op in processed_ops {
-                ops_by_loc.entry(op.basis_loc).or_default().push(op.op_id);
+            for op in &processed_ops {
+                ops_by_loc.entry(op.basis_loc).or_default().push(op.op_id.clone());
             }
 
             // Publish each group to the appropriate DHT authorities
             for (basis_loc, op_ids) in ops_by_loc {
+                let op_count = op_ids.len();
                 match gateway_kitsune.publish_ops(&dna_hash, op_ids, basis_loc).await {
                     Ok(peer_count) => {
-                        debug!(
-                            dna = %dna_hash,
-                            basis_loc,
-                            peer_count,
-                            "Published ops to DHT authorities"
-                        );
+                        if peer_count > 0 {
+                            // Only count as published if at least one peer received it
+                            published += op_count;
+                            debug!(
+                                dna = %dna_hash,
+                                basis_loc,
+                                peer_count,
+                                op_count,
+                                "Published ops to DHT authorities"
+                            );
+                        } else {
+                            warn!(
+                                dna = %dna_hash,
+                                basis_loc,
+                                op_count,
+                                "No peers available to publish ops - retry needed"
+                            );
+                        }
                     }
                     Err(e) => {
                         warn!(
@@ -176,24 +193,25 @@ pub async fn dht_publish(
                             error = %e,
                             "Failed to publish ops to DHT authorities"
                         );
-                        // Don't fail the request - ops are stored and can be fetched
                     }
                 }
             }
         } else {
-            debug!(
+            warn!(
                 dna = %dna_hash,
                 "No GatewayKitsune configured - ops stored but not published to network"
             );
         }
     }
 
-    let success = failed == 0;
+    // Success requires: no storage failures AND at least some ops published to peers
+    let success = failed == 0 && (queued == 0 || published > 0);
 
     info!(
         dna = %dna_hash,
         queued,
         failed,
+        published,
         success,
         "Publish request completed"
     );
@@ -202,6 +220,7 @@ pub async fn dht_publish(
         success,
         queued,
         failed,
+        published,
         results,
     }))
 }

@@ -667,6 +667,33 @@ impl GatewayKitsune {
         // Get or create the space
         let space = self.get_or_create_space(dna_hash).await?;
 
+        // Debug: Get all peers in the peer store
+        let all_peers = space.peer_store().get_all().await
+            .map_err(|e| format!("Failed to get all peers: {}", e))?;
+        debug!(
+            dna = %dna_hash,
+            peer_count = all_peers.len(),
+            "Peer store contents before publish"
+        );
+        for peer in &all_peers {
+            debug!(
+                agent = ?peer.agent,
+                arc = ?peer.storage_arc,
+                url = ?peer.url,
+                is_tombstone = peer.is_tombstone,
+                "Peer in store"
+            );
+        }
+
+        // Debug: Get local agents
+        let local_agents = space.local_agent_store().get_all().await
+            .map_err(|e| format!("Failed to get local agents: {}", e))?;
+        debug!(
+            dna = %dna_hash,
+            local_agent_count = local_agents.len(),
+            "Local agents in space"
+        );
+
         // Find peers near the basis location
         let agents = get_responsive_remote_agents_near_location(
             space.peer_store().clone(),
@@ -678,11 +705,23 @@ impl GatewayKitsune {
         .await
         .map_err(|e| format!("Failed to find peers: {}", e))?;
 
+        debug!(
+            dna = %dna_hash,
+            basis_loc,
+            found_agents = agents.len(),
+            "Found responsive remote agents near location"
+        );
+
         // Collect unique URLs (filter out tombstones)
         let urls: std::collections::HashSet<Url> = agents
             .into_iter()
             .filter_map(|info| {
                 if info.is_tombstone {
+                    debug!(agent = ?info.agent, "Skipping tombstone agent");
+                    return None;
+                }
+                if info.url.is_none() {
+                    debug!(agent = ?info.agent, "Skipping agent with no URL");
                     return None;
                 }
                 info.url.clone()
