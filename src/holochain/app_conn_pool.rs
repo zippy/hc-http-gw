@@ -337,6 +337,7 @@ impl AppConnPool {
                         // Create server message with string representations for JSON
                         let server_msg = ServerMessage::Signal {
                             dna_hash: dna_hash.to_string(),
+                            to_agent: agent_pubkey.to_string(),
                             from_agent: agent_pubkey.to_string(),
                             zome_name: zome_name.to_string(),
                             signal: signal_base64,
@@ -475,6 +476,7 @@ mod tests {
         // Verify by sending a signal through the original and checking it arrives
         let signal = crate::routes::websocket::ServerMessage::Signal {
             dna_hash: test_dna.to_string(),
+            to_agent: test_agent.to_string(),
             from_agent: "sender".to_string(),
             zome_name: "test_zome".to_string(),
             signal: "test_signal".to_string(),

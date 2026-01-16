@@ -106,6 +106,8 @@ pub enum ServerMessage {
     Signal {
         /// DNA hash.
         dna_hash: String,
+        /// Target agent (the local agent this signal is addressed to).
+        to_agent: String,
         /// Sender agent.
         from_agent: String,
         /// Zome that emitted the signal.
@@ -602,6 +604,7 @@ mod tests {
     fn test_server_message_signal() {
         let msg = ServerMessage::Signal {
             dna_hash: "dna1".to_string(),
+            to_agent: "target1".to_string(),
             from_agent: "agent1".to_string(),
             zome_name: "zome1".to_string(),
             signal: "c2lnbmFsX2RhdGE=".to_string(), // base64 "signal_data"
@@ -609,6 +612,7 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"signal""#));
         assert!(json.contains(r#""dna_hash":"dna1""#));
+        assert!(json.contains(r#""to_agent":"target1""#));
         assert!(json.contains(r#""from_agent":"agent1""#));
         assert!(json.contains(r#""zome_name":"zome1""#));
     }

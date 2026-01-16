@@ -381,6 +381,7 @@ mod tests {
             success: true,
             queued: 2,
             failed: 0,
+            published: 2,
             results: vec![
                 OpPublishResult {
                     success: true,

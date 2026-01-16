@@ -467,6 +467,7 @@ mod tests {
 
         let signal = ServerMessage::Signal {
             dna_hash: dna1.to_string(),
+            to_agent: agent1.to_string(),
             from_agent: "sender".to_string(),
             zome_name: "test_zome".to_string(),
             signal: "test_signal".to_string(),
@@ -494,6 +495,7 @@ mod tests {
 
         let signal = ServerMessage::Signal {
             dna_hash: dna1.to_string(),
+            to_agent: agent1.to_string(),
             from_agent: "sender".to_string(),
             zome_name: "test_zome".to_string(),
             signal: "test_signal".to_string(),
@@ -518,6 +520,7 @@ mod tests {
 
         let signal = ServerMessage::Signal {
             dna_hash: dna1.to_string(),
+            to_agent: agent1.to_string(),
             from_agent: "sender".to_string(),
             zome_name: "test_zome".to_string(),
             signal: "test_signal".to_string(),

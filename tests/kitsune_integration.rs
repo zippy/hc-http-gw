@@ -141,12 +141,14 @@ async fn test_signal_forwarding_integration() {
     match received {
         holochain_http_gateway::routes::websocket::ServerMessage::Signal {
             dna_hash,
+            to_agent,
             from_agent,
             zome_name,
             signal,
         } => {
             // dna_hash should be the HoloHash string representation
             assert_eq!(dna_hash, dna.to_string());
+            assert_eq!(to_agent, agent.to_string());
             assert_eq!(from_agent, "remote");
             assert_eq!(zome_name, "recv_remote_signal");
             // Signal should be base64-encoded version of the zome_call_params

@@ -93,6 +93,7 @@ pub async fn test_signal(
     // Create the signal message
     let signal_msg = ServerMessage::Signal {
         dna_hash: request.dna_hash.clone(),
+        to_agent: request.agent_pubkey.clone(),
         from_agent: "test".to_string(),
         zome_name: request.zome_name,
         signal: request.signal,
